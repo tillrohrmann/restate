@@ -8,6 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+mod buffer;
 mod input_command;
 mod invocation_state_machine;
 mod invocation_task;
@@ -24,8 +25,8 @@ use invocation_task::InvocationTask;
 use invocation_task::{InvocationTaskOutput, InvocationTaskOutputInner};
 use restate_errors::warn_it;
 use restate_invoker_api::{
-    Effect, EffectKind, EntryEnricher, InvocationErrorReport, InvokeInputJournal, JournalReader,
-    StateReader,
+    Effect, EffectKind, EntryEnricher, InvocationErrorReport, InvokeInputJournal, JournalEntry,
+    JournalReader, StateReader,
 };
 use restate_queue::SegmentQueue;
 use restate_schema_api::deployment::DeploymentMetadataResolver;
@@ -33,7 +34,6 @@ use restate_timer_queue::TimerQueue;
 use restate_types::errors::InvocationError;
 use restate_types::identifiers::{DeploymentId, FullInvocationId, PartitionKey, WithPartitionKey};
 use restate_types::identifiers::{EntryIndex, PartitionLeaderEpoch};
-use restate_types::journal::enriched::EnrichedRawEntry;
 use restate_types::journal::Completion;
 use restate_types::retries::RetryPolicy;
 use status_store::InvocationStatusStore;
@@ -93,6 +93,8 @@ struct DefaultInvocationTaskRunner<JR, SR, EE, DMR> {
     state_reader: SR,
     entry_enricher: EE,
     deployment_metadata_resolver: DMR,
+    buffer_capacity: usize,
+    buffer_max_size_in_bytes: Option<usize>,
 }
 
 impl<JR, SR, EE, DMR> InvocationTaskRunner for DefaultInvocationTaskRunner<JR, SR, EE, DMR>
@@ -130,6 +132,8 @@ where
                 self.deployment_metadata_resolver.clone(),
                 invoker_tx,
                 invoker_rx,
+                self.buffer_capacity,
+                self.buffer_max_size_in_bytes,
             )
             .run(input_journal),
         )
@@ -161,6 +165,8 @@ impl<JR, SR, EE, DMR> Service<JR, SR, EE, DMR> {
         disable_eager_state: bool,
         message_size_warning: usize,
         message_size_limit: Option<usize>,
+        buffer_capacity: usize,
+        buffer_max_size_in_bytes: Option<usize>,
         client: ServiceClient,
         tmp_dir: PathBuf,
         concurrency_limit: Option<usize>,
@@ -189,6 +195,8 @@ impl<JR, SR, EE, DMR> Service<JR, SR, EE, DMR> {
                     state_reader,
                     entry_enricher,
                     deployment_metadata_resolver,
+                    buffer_capacity,
+                    buffer_max_size_in_bytes,
                 },
                 retry_policy,
                 invocation_tasks: Default::default(),
@@ -339,15 +347,22 @@ where
                             has_changed,
                         ).await
                     }
-                    InvocationTaskOutputInner::NewEntry {entry_index, entry, requires_ack} => {
+                    InvocationTaskOutputInner::NewEntry(journal_entry, requires_ack) => {
                         self.handle_new_entry(
                             partition,
                             full_invocation_id,
-                            entry_index,
-                            entry,
+                            journal_entry,
                             requires_ack
                         ).await
                     },
+                    InvocationTaskOutputInner::NewEntries(journal_entries, requires_acks) => {
+                        self.handle_new_entries(
+                            partition,
+                            full_invocation_id,
+                            journal_entries,
+                            requires_acks,
+                        ).await
+                    }
                     InvocationTaskOutputInner::Closed => {
                         self.handle_invocation_task_closed(partition, full_invocation_id).await
                     },
@@ -532,23 +547,22 @@ where
             rpc.service = %full_invocation_id.service_id.service_name,
             restate.invocation.id = %full_invocation_id,
             restate.invoker.partition_leader_epoch = ?partition,
-            restate.journal.index = entry_index,
-            restate.journal.entry_type = ?entry.ty(),
+            restate.journal.index = journal_entry.entry_index,
+            restate.journal.entry_type = ?journal_entry.entry.ty(),
         )
     )]
     async fn handle_new_entry(
         &mut self,
         partition: PartitionLeaderEpoch,
         full_invocation_id: FullInvocationId,
-        entry_index: EntryIndex,
-        entry: EnrichedRawEntry,
+        journal_entry: JournalEntry,
         requires_ack: bool,
     ) {
         if let Some((output_tx, ism)) = self
             .invocation_state_machine_manager
             .resolve_invocation(partition, &full_invocation_id)
         {
-            ism.notify_new_entry(entry_index, requires_ack);
+            ism.notify_new_entry(journal_entry.entry_index, requires_ack);
             trace!(
                 "Received a new entry. Invocation state: {:?}",
                 ism.invocation_state_debug()
@@ -564,12 +578,61 @@ where
             let _ = output_tx
                 .send(Effect {
                     full_invocation_id,
-                    kind: EffectKind::JournalEntry { entry_index, entry },
+                    kind: EffectKind::JournalEntry(journal_entry),
                 })
                 .await;
         } else {
             // If no state machine, this might be an entry for an aborted invocation.
             trace!("No state machine found for given entry");
+        }
+    }
+
+    #[instrument(
+    level = "trace",
+    skip_all,
+    fields(
+    rpc.service = %full_invocation_id.service_id.service_name,
+    restate.invocation.id = %full_invocation_id,
+    restate.invoker.partition_leader_epoch = ?partition,
+    )
+    )]
+    async fn handle_new_entries(
+        &mut self,
+        partition: PartitionLeaderEpoch,
+        full_invocation_id: FullInvocationId,
+        journal_entries: Vec<JournalEntry>,
+        requires_ack: Vec<bool>,
+    ) {
+        if let Some((output_tx, ism)) = self
+            .invocation_state_machine_manager
+            .resolve_invocation(partition, &full_invocation_id)
+        {
+            trace!(
+                "Received new entries. Invocation state: {:?}",
+                ism.invocation_state_debug()
+            );
+            if let Some(deployment_id) = ism.chosen_deployment_to_notify() {
+                let _ = output_tx
+                    .send(Effect {
+                        full_invocation_id: full_invocation_id.clone(),
+                        kind: EffectKind::SelectedDeployment(deployment_id),
+                    })
+                    .await;
+            }
+
+            for index in 0..journal_entries.len() {
+                ism.notify_new_entry(journal_entries[index].entry_index, requires_ack[index]);
+            }
+
+            let _ = output_tx
+                .send(Effect {
+                    full_invocation_id,
+                    kind: EffectKind::JournalEntries(journal_entries),
+                })
+                .await;
+        } else {
+            // If no state machine, this might be an entry for an aborted invocation.
+            trace!("No state machine found");
         }
     }
 
@@ -1007,6 +1070,8 @@ mod tests {
             false,
             1024,
             None,
+            1024,
+            None,
             ServiceClientOptions::default()
                 .build(restate_service_client::AssumeRoleCacheMode::None),
             tempdir.into_path(),
@@ -1145,11 +1210,16 @@ mod tests {
                 let _ = invoker_tx.send(InvocationTaskOutput {
                     partition,
                     full_invocation_id,
-                    inner: InvocationTaskOutputInner::NewEntry {
-                        entry_index: 1,
-                        entry: RawEntry::new(EnrichedEntryHeader::SetState {}, Bytes::default()),
-                        requires_ack: false,
-                    },
+                    inner: InvocationTaskOutputInner::NewEntry(
+                        JournalEntry {
+                            entry_index: 1,
+                            entry: RawEntry::new(
+                                EnrichedEntryHeader::SetState {},
+                                Bytes::default(),
+                            ),
+                        },
+                        false,
+                    ),
                 });
                 pending() // Never ends
             },

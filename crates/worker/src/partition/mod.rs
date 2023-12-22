@@ -177,7 +177,7 @@ where
                                     }
                                 }
 
-                                debug!("Batch size: {}", batch_size);
+                                info!("Batch size: {}", batch_size);
 
                                 // Commit actuator messages
                                 let message_collector = cmd_application_result.commit().await?;

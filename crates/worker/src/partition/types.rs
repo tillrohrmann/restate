@@ -25,6 +25,8 @@ use std::hash::{Hash, Hasher};
 pub(crate) type InvokerEffect = restate_invoker_api::Effect;
 pub(crate) type InvokerEffectKind = restate_invoker_api::EffectKind;
 
+pub(crate) type InvokerJournalEntry = restate_invoker_api::JournalEntry;
+
 #[derive(Debug, Clone)]
 pub struct TimerValue {
     pub full_invocation_id: FullInvocationId,

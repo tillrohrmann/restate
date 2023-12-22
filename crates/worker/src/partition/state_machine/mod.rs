@@ -89,6 +89,7 @@ mod tests {
     use googletest::matcher::Matcher;
     use googletest::{all, assert_that, pat, property};
     use restate_invoker_api::InvokeInputJournal;
+    use restate_invoker_api::JournalEntry as InvokerJournalEntry;
     use restate_service_protocol::codec::ProtobufRawEntryCodec;
     use restate_storage_api::inbox_table::InboxTable;
     use restate_storage_api::journal_table::{JournalEntry, JournalTable};
@@ -278,10 +279,10 @@ mod tests {
         let actions = state_machine
             .apply_cmd(Command::Invoker(InvokerEffect {
                 full_invocation_id: fid.clone(),
-                kind: InvokerEffectKind::JournalEntry {
+                kind: InvokerEffectKind::JournalEntry(InvokerJournalEntry {
                     entry_index: 1,
                     entry: ProtobufRawEntryCodec::serialize_enriched(Entry::awakeable(None)),
-                },
+                }),
             }))
             .await;
 

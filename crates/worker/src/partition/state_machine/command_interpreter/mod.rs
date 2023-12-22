@@ -15,7 +15,9 @@ use crate::partition::services::deterministic;
 use crate::partition::services::non_deterministic::{Effect as NBISEffect, Effects as NBISEffects};
 use crate::partition::state_machine::commands::Command;
 use crate::partition::state_machine::effects::Effects;
-use crate::partition::types::{InvokerEffect, InvokerEffectKind, OutboxMessageExt};
+use crate::partition::types::{
+    InvokerEffect, InvokerEffectKind, InvokerJournalEntry, OutboxMessageExt,
+};
 use crate::partition::TimerValue;
 use assert2::let_assert;
 use bytes::Bytes;
@@ -50,7 +52,7 @@ use restate_types::time::MillisSinceEpoch;
 use std::fmt::{Debug, Formatter};
 use std::marker::PhantomData;
 use std::ops::Deref;
-use tracing::{debug, instrument, trace};
+use tracing::{debug, info, instrument, trace};
 
 pub trait StateReader {
     // TODO: Replace with async trait or proper future
@@ -807,7 +809,7 @@ where
                     invocation_metadata,
                 );
             }
-            InvokerEffectKind::JournalEntry { entry_index, entry } => {
+            InvokerEffectKind::JournalEntry(InvokerJournalEntry { entry_index, entry }) => {
                 self.handle_journal_entry(
                     effects,
                     state,
@@ -817,6 +819,23 @@ where
                     invocation_metadata,
                 )
                 .await?;
+            }
+            InvokerEffectKind::JournalEntries(journal_entries) => {
+                info!(
+                    "Received {} batched journal entries.",
+                    journal_entries.len()
+                );
+                for InvokerJournalEntry { entry_index, entry } in journal_entries {
+                    self.handle_journal_entry(
+                        effects,
+                        state,
+                        full_invocation_id.clone(),
+                        entry_index,
+                        entry,
+                        invocation_metadata.clone(),
+                    )
+                    .await?;
+                }
             }
             InvokerEffectKind::Suspended {
                 waiting_for_completed_entries,

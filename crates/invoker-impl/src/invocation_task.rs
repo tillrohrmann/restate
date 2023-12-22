@@ -22,7 +22,7 @@ use opentelemetry::sdk::propagation::TraceContextPropagator;
 use opentelemetry_http::HeaderInjector;
 use restate_errors::warn_it;
 use restate_invoker_api::{
-    EagerState, EntryEnricher, InvokeInputJournal, JournalReader, StateReader,
+    EagerState, EntryEnricher, InvokeInputJournal, JournalEntry, JournalReader, StateReader,
 };
 use restate_schema_api::deployment::{
     DeploymentMetadata, DeploymentMetadataResolver, DeploymentType, ProtocolType,
@@ -36,12 +36,12 @@ use restate_types::identifiers::{
     DeploymentId, EntryIndex, FullInvocationId, PartitionLeaderEpoch,
 };
 use restate_types::invocation::ServiceInvocationSpanContext;
-use restate_types::journal::enriched::EnrichedRawEntry;
 use restate_types::journal::raw::PlainRawEntry;
 use restate_types::journal::EntryType;
 use std::collections::HashSet;
 use std::error::Error;
 
+use crate::buffer::JournalBuffer;
 use hyper::http::uri::PathAndQuery;
 use std::future::{poll_fn, Future};
 use std::iter;
@@ -167,16 +167,8 @@ pub(super) struct InvocationTaskOutput {
 pub(super) enum InvocationTaskOutputInner {
     // `has_changed` indicates if we believe this is a freshly selected endpoint or not.
     SelectedDeployment(DeploymentId, /* has_changed: */ bool),
-    NewEntry {
-        entry_index: EntryIndex,
-        entry: EnrichedRawEntry,
-        /// If true, the SDK requested to be notified when the entry is correctly stored.
-        ///
-        /// When reading the entry from the storage this flag will always be false, as we never need to send acks for entries sent during a journal replay.
-        ///
-        /// See https://github.com/restatedev/service-protocol/blob/main/service-invocation-protocol.md#acknowledgment-of-stored-entries
-        requires_ack: bool,
-    },
+    NewEntry(JournalEntry, bool),
+    NewEntries(Vec<JournalEntry>, Vec<bool>),
     Closed,
     Suspended(HashSet<EntryIndex>),
     Failed(InvocationTaskError),
@@ -214,6 +206,8 @@ pub(super) struct InvocationTask<JR, SR, EE, DMR> {
 
     // Task state
     next_journal_index: EntryIndex,
+
+    journal_buffer: JournalBuffer,
 }
 
 /// This is needed to split the run_internal in multiple loop functions and have shortcircuiting.
@@ -271,6 +265,8 @@ where
         deployment_metadata_resolver: DMR,
         invoker_tx: mpsc::UnboundedSender<InvocationTaskOutput>,
         invoker_rx: mpsc::UnboundedReceiver<Notification>,
+        buffer_capacity: usize,
+        buffer_max_size_in_bytes: Option<usize>,
     ) -> Self {
         Self {
             client,
@@ -288,6 +284,7 @@ where
             invoker_rx,
             encoder: Encoder::new(protocol_version),
             decoder: Decoder::new(message_size_warning, message_size_limit),
+            journal_buffer: JournalBuffer::new(buffer_capacity, buffer_max_size_in_bytes),
         }
     }
 
@@ -541,7 +538,7 @@ where
                 },
                 opt_buf = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)) => {
                     match shortcircuit!(opt_buf) {
-                        Some(buf) => shortcircuit!(self.handle_read(parent_span_context, buf)),
+                        Some(buf) => shortcircuit!(self.try_batch_read(http_stream_rx, buf, parent_span_context)),
                         None => {
                             // Response stream was closed without SuspensionMessage, EndMessage or ErrorMessage
                             return TerminalLoopState::Failed(InvocationTaskError::ErrorMessageReceived(
@@ -569,7 +566,7 @@ where
             tokio::select! {
                 opt_buf = poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)) => {
                     match shortcircuit!(opt_buf) {
-                        Some(buf) => shortcircuit!(self.handle_read(parent_span_context, buf)),
+                        Some(buf) => shortcircuit!(self.try_batch_read(http_stream_rx, buf, parent_span_context)),
                         None => {
                             // Response stream was closed without SuspensionMessage, EndMessage or ErrorMessage
                             return TerminalLoopState::Failed(InvocationTaskError::ErrorMessageReceived(
@@ -630,6 +627,64 @@ where
         Ok(())
     }
 
+    fn try_batch_read(
+        &mut self,
+        http_stream_rx: &mut ResponseStreamState,
+        buf: Bytes,
+        parent_span_context: &ServiceInvocationSpanContext,
+    ) -> TerminalLoopState<()> {
+        assert!(
+            self.journal_buffer.is_empty(),
+            "journal buffer should be empty"
+        );
+
+        let mut result = self.handle_read(parent_span_context, buf);
+
+        while matches!(result, TerminalLoopState::Continue(_)) && !self.journal_buffer.is_full() {
+            match poll_fn(|cx| http_stream_rx.poll_next_chunk(cx)).now_or_never() {
+                None => break,
+                Some(buf) => {
+                    let buf = shortcircuit!(buf);
+
+                    match buf {
+                        None => {
+                            result = TerminalLoopState::Failed(
+                                InvocationTaskError::ErrorMessageReceived(
+                                    InvocationError::default(),
+                                ),
+                            )
+                        }
+                        Some(buf) => result = self.handle_read(parent_span_context, buf),
+                    }
+                }
+            }
+        }
+
+        if !matches!(result, TerminalLoopState::Failed(_)) {
+            let (num_entries, journal_entries, requires_ack) = self.journal_buffer.drain();
+
+            let inner = if num_entries == 1 {
+                InvocationTaskOutputInner::NewEntry(
+                    journal_entries.into_iter().next().unwrap(),
+                    requires_ack.into_iter().next().unwrap(),
+                )
+            } else {
+                InvocationTaskOutputInner::NewEntries(
+                    journal_entries.collect(),
+                    requires_ack.collect(),
+                )
+            };
+
+            let _ = self.invoker_tx.send(InvocationTaskOutput {
+                partition: self.partition,
+                full_invocation_id: self.full_invocation_id.clone(),
+                inner,
+            });
+        }
+
+        result
+    }
+
     fn handle_read(
         &mut self,
         parent_span_context: &ServiceInvocationSpanContext,
@@ -638,7 +693,13 @@ where
         self.decoder.push(buf);
 
         while let Some((frame_header, frame)) = shortcircuit!(self.decoder.consume_next()) {
-            shortcircuit!(self.handle_message(parent_span_context, frame_header, frame));
+            let (journal_entry, requires_ack) =
+                shortcircuit!(self.handle_message(parent_span_context, frame_header, frame));
+            self.journal_buffer.push_entry(journal_entry, requires_ack);
+
+            if self.journal_buffer.is_full() {
+                break;
+            }
         }
 
         TerminalLoopState::Continue(())
@@ -649,7 +710,7 @@ where
         parent_span_context: &ServiceInvocationSpanContext,
         mh: MessageHeader,
         message: ProtocolMessage,
-    ) -> TerminalLoopState<()> {
+    ) -> TerminalLoopState<(JournalEntry, bool)> {
         trace!(restate.protocol.message_header = ?mh, restate.protocol.message = ?message, "Received message");
         match message {
             ProtocolMessage::Start { .. } => TerminalLoopState::Failed(
@@ -690,19 +751,16 @@ where
                         entry_type,
                         e
                     )));
-                let _ = self.invoker_tx.send(InvocationTaskOutput {
-                    partition: self.partition,
-                    full_invocation_id: self.full_invocation_id.clone(),
-                    inner: InvocationTaskOutputInner::NewEntry {
+                self.next_journal_index += 1;
+
+                TerminalLoopState::Continue((
+                    JournalEntry {
                         entry_index: self.next_journal_index,
                         entry: enriched_entry,
-                        requires_ack: mh
-                            .requires_ack()
-                            .expect("All entry messages support requires_ack"),
                     },
-                });
-                self.next_journal_index += 1;
-                TerminalLoopState::Continue(())
+                    mh.requires_ack()
+                        .expect("All entry messages support requires_ack"),
+                ))
             }
         }
     }
