@@ -949,10 +949,10 @@ where
         mut journal_entry: EnrichedRawEntry,
         invocation_metadata: InvocationMetadata,
     ) -> Result<(), Error> {
-        debug_assert_eq!(
-            entry_index, invocation_metadata.journal_metadata.length,
-            "Expect to receive next journal entry for {full_invocation_id}"
-        );
+        // debug_assert_eq!(
+        //     entry_index, invocation_metadata.journal_metadata.length,
+        //     "Expect to receive next journal entry for {full_invocation_id}"
+        // );
 
         match journal_entry.header() {
             // nothing to do

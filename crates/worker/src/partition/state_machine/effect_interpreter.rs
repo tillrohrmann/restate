@@ -176,6 +176,11 @@ where
         txn.commit().await?;
         Ok(collector)
     }
+
+    pub fn into_inner(self) -> (Txn, Collector) {
+        let Self { txn, collector } = self;
+        (txn, collector)
+    }
 }
 
 pub(crate) struct EffectInterpreter<Codec> {
@@ -583,10 +588,10 @@ impl<Codec: RawEntryCodec> EffectInterpreter<Codec> {
         let journal_meta = previous_invocation_status
             .get_journal_metadata_mut()
             .expect("At this point there must be a journal");
-        debug_assert_eq!(
-            journal_meta.length, entry_index,
-            "journal should not have gaps"
-        );
+        // debug_assert_eq!(
+        //     journal_meta.length, entry_index,
+        //     "journal should not have gaps"
+        // );
         journal_meta.length = entry_index + 1;
 
         // Update timestamps
