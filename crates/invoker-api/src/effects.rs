@@ -24,10 +24,8 @@ pub struct Effect {
 pub enum EffectKind {
     /// This is sent before any new entry is created by the invoker. This won't be sent if the deployment_id is already set.
     SelectedDeployment(DeploymentId),
-    JournalEntry {
-        entry_index: EntryIndex,
-        entry: EnrichedRawEntry,
-    },
+    JournalEntry(JournalEntry),
+    JournalEntries(Vec<JournalEntry>),
     Suspended {
         waiting_for_completed_entries: HashSet<EntryIndex>,
     },
@@ -35,4 +33,10 @@ pub enum EffectKind {
     End,
     /// This is sent when the invoker exhausted all its attempts to make progress on the specific invocation.
     Failed(InvocationError),
+}
+
+#[derive(Debug, Clone)]
+pub struct JournalEntry {
+    pub entry_index: EntryIndex,
+    pub entry: EnrichedRawEntry,
 }

@@ -79,6 +79,16 @@ pub struct Options {
     /// Threshold to fail the invocation in case protocol messages coming from a service are larger than the specified amount.
     message_size_limit: Option<usize>,
 
+    /// # Buffer capacity for each invocation
+    ///
+    /// Maximum number of journal entries that can be buffered for each invocation.
+    buffer_capacity: usize,
+
+    /// # Buffer max size in bytes
+    ///
+    /// Maximum aggregated size of all buffered journal entries if configured.
+    buffer_max_size_in_bytes: Option<usize>,
+
     /// # Temporary directory
     ///
     /// Temporary directory to use for the invoker temporary files.
@@ -114,6 +124,8 @@ impl Default for Options {
             concurrency_limit: None,
             service_client: Default::default(),
             disable_eager_state: false,
+            buffer_capacity: 1024,
+            buffer_max_size_in_bytes: Some(1024 * 1024),
         }
     }
 }
@@ -142,6 +154,8 @@ impl Options {
             self.disable_eager_state,
             self.message_size_warning,
             self.message_size_limit,
+            self.buffer_capacity,
+            self.buffer_max_size_in_bytes,
             client,
             self.tmp_dir,
             self.concurrency_limit,

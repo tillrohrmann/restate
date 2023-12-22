@@ -15,7 +15,9 @@ use crate::partition::services::deterministic;
 use crate::partition::services::non_deterministic::{Effect as NBISEffect, Effects as NBISEffects};
 use crate::partition::state_machine::commands::Command;
 use crate::partition::state_machine::effects::Effects;
-use crate::partition::types::{InvokerEffect, InvokerEffectKind, OutboxMessageExt};
+use crate::partition::types::{
+    InvokerEffect, InvokerEffectKind, InvokerJournalEntry, OutboxMessageExt,
+};
 use crate::partition::TimerValue;
 use assert2::let_assert;
 use bytes::Bytes;
@@ -807,7 +809,7 @@ where
                     invocation_metadata,
                 );
             }
-            InvokerEffectKind::JournalEntry { entry_index, entry } => {
+            InvokerEffectKind::JournalEntry(InvokerJournalEntry { entry_index, entry }) => {
                 self.handle_journal_entry(
                     effects,
                     state,
@@ -815,6 +817,16 @@ where
                     entry_index,
                     entry,
                     invocation_metadata,
+                )
+                .await?;
+            }
+            InvokerEffectKind::JournalEntries(journal_entries) => {
+                self.handle_journal_entries(
+                    effects,
+                    state,
+                    full_invocation_id,
+                    invocation_metadata,
+                    journal_entries,
                 )
                 .await?;
             }
@@ -940,6 +952,46 @@ where
         }
     }
 
+    async fn handle_journal_entries<State: StateReader>(
+        &mut self,
+        effects: &mut Effects,
+        state: &mut State,
+        full_invocation_id: FullInvocationId,
+        invocation_metadata: InvocationMetadata,
+        mut journal_entries: Vec<InvokerJournalEntry>,
+    ) -> Result<(), Error> {
+        debug_assert_eq!(
+            journal_entries
+                .first()
+                .map(|journal_entry| journal_entry.entry_index),
+            Some(invocation_metadata.journal_metadata.length),
+            "Expect to receive next journal entry for {full_invocation_id}"
+        );
+
+        for journal_entry in journal_entries.iter_mut() {
+            self.process_journal_entry(
+                effects,
+                state,
+                full_invocation_id.clone(),
+                journal_entry.entry_index,
+                &mut journal_entry.entry,
+                &invocation_metadata,
+            )
+            .await?;
+
+            effects
+                .send_stored_ack_to_invoker(full_invocation_id.clone(), journal_entry.entry_index);
+        }
+
+        effects.append_journal_entries(
+            full_invocation_id.service_id.clone(),
+            InvocationStatus::Invoked(invocation_metadata),
+            journal_entries,
+        );
+
+        Ok(())
+    }
+
     async fn handle_journal_entry<State: StateReader>(
         &mut self,
         effects: &mut Effects,
@@ -954,6 +1006,36 @@ where
             "Expect to receive next journal entry for {full_invocation_id}"
         );
 
+        self.process_journal_entry(
+            effects,
+            state,
+            full_invocation_id.clone(),
+            entry_index,
+            &mut journal_entry,
+            &invocation_metadata,
+        )
+        .await?;
+
+        effects.append_journal_entry(
+            full_invocation_id.service_id.clone(),
+            InvocationStatus::Invoked(invocation_metadata),
+            entry_index,
+            journal_entry,
+        );
+        effects.send_stored_ack_to_invoker(full_invocation_id, entry_index);
+
+        Ok(())
+    }
+
+    async fn process_journal_entry<State: StateReader>(
+        &mut self,
+        effects: &mut Effects,
+        state: &mut State,
+        full_invocation_id: FullInvocationId,
+        entry_index: EntryIndex,
+        journal_entry: &mut EnrichedRawEntry,
+        invocation_metadata: &InvocationMetadata,
+    ) -> Result<(), Error> {
         match journal_entry.header() {
             // nothing to do
             EnrichedEntryHeader::PollInputStream { is_completed, .. } => {
@@ -993,11 +1075,11 @@ where
                     let completion_result = value
                         .map(CompletionResult::Success)
                         .unwrap_or(CompletionResult::Empty);
-                    Codec::write_completion(&mut journal_entry, completion_result.clone())?;
+                    Codec::write_completion(journal_entry, completion_result.clone())?;
 
                     // We can already forward the completion
                     effects.forward_completion(
-                        full_invocation_id.clone(),
+                        full_invocation_id,
                         Completion::new(entry_index, completion_result),
                     );
                 }
@@ -1008,9 +1090,10 @@ where
                         journal_entry.deserialize_entry_ref::<Codec>()?
                 );
 
+                let invocation_id = InvocationId::from(&full_invocation_id);
                 effects.set_state(
-                    full_invocation_id.service_id.clone(),
-                    InvocationId::from(&full_invocation_id),
+                    full_invocation_id.service_id,
+                    invocation_id,
                     invocation_metadata.journal_metadata.span_context.clone(),
                     key,
                     value,
@@ -1021,9 +1104,11 @@ where
                     Entry::ClearState(ClearStateEntry { key }) =
                         journal_entry.deserialize_entry_ref::<Codec>()?
                 );
+
+                let invocation_id = InvocationId::from(&full_invocation_id);
                 effects.clear_state(
-                    full_invocation_id.service_id.clone(),
-                    InvocationId::from(&full_invocation_id),
+                    full_invocation_id.service_id,
+                    invocation_id,
                     invocation_metadata.journal_metadata.span_context.clone(),
                     key,
                 );
@@ -1039,7 +1124,7 @@ where
                         // Registering a timer generates multiple effects: timer registration and
                         // journal append which each generate actuator messages for the timer service
                         // and the invoker --> Cloning required
-                        full_invocation_id.clone(),
+                        full_invocation_id,
                         MillisSinceEpoch::new(wake_up_time),
                         entry_index,
                     ),
@@ -1066,7 +1151,7 @@ where
                         service_key.clone(),
                         request,
                         Source::Service(full_invocation_id.clone()),
-                        Some((full_invocation_id.clone(), entry_index)),
+                        Some((full_invocation_id, entry_index)),
                         span_context.clone(),
                     );
                     self.send_message(
@@ -1126,7 +1211,7 @@ where
                 } else {
                     effects.register_timer(
                         TimerValue::new_invoke(
-                            full_invocation_id.clone(),
+                            full_invocation_id,
                             MillisSinceEpoch::new(invoke_time),
                             entry_index,
                             service_invocation,
@@ -1144,7 +1229,7 @@ where
                     .load_completion_result(&full_invocation_id.service_id, entry_index)
                     .await?
                 {
-                    Codec::write_completion(&mut journal_entry, completion_result.clone())?;
+                    Codec::write_completion(journal_entry, completion_result.clone())?;
 
                     effects.forward_completion(
                         full_invocation_id.clone(),
@@ -1178,15 +1263,6 @@ where
                 // We just store it
             }
         }
-
-        effects.append_journal_entry(
-            full_invocation_id.service_id.clone(),
-            InvocationStatus::Invoked(invocation_metadata),
-            entry_index,
-            journal_entry,
-        );
-        effects.send_stored_ack_to_invoker(full_invocation_id, entry_index);
-
         Ok(())
     }
 

@@ -22,6 +22,7 @@ use tracing::{debug_span, event_enabled, span_enabled, trace, trace_span, Level}
 use types::TimerKeyDisplay;
 
 use crate::partition::state_machine::commands::AckResponse;
+use crate::partition::types::InvokerJournalEntry;
 use crate::partition::{types, TimerValue};
 use restate_storage_api::outbox_table::OutboxMessage;
 use restate_storage_api::status_table::InvocationMetadata;
@@ -117,6 +118,14 @@ pub(crate) enum Effect {
         previous_invocation_status: InvocationStatus,
         entry_index: EntryIndex,
         journal_entry: EnrichedRawEntry,
+    },
+    AppendJournalEntries {
+        service_id: ServiceId,
+        // We pass around the invocation_status here to avoid an additional read.
+        // We could in theory get rid of this here (and in other places, such as StoreDeploymentId),
+        // by using a merge operator in rocksdb.
+        previous_invocation_status: InvocationStatus,
+        journal_entries: Vec<InvokerJournalEntry>,
     },
     StoreCompletion {
         full_invocation_id: FullInvocationId,
@@ -490,6 +499,13 @@ impl Effect {
                 "Effect: Write journal entry {:?} to storage",
                 journal_entry.header().as_entry_type()
             ),
+            Effect::AppendJournalEntries {
+                journal_entries, ..
+            } => debug_if_leader!(
+                is_leader,
+                "Effect: Write journal entries {:?} to storage",
+                journal_entries.len()
+            ),
             Effect::StoreCompletion {
                 completion:
                     Completion {
@@ -819,6 +835,19 @@ impl Effects {
             previous_invocation_status,
             entry_index,
             journal_entry,
+        })
+    }
+
+    pub(crate) fn append_journal_entries(
+        &mut self,
+        service_id: ServiceId,
+        previous_invocation_status: InvocationStatus,
+        journal_entries: Vec<InvokerJournalEntry>,
+    ) {
+        self.effects.push(Effect::AppendJournalEntries {
+            service_id,
+            previous_invocation_status,
+            journal_entries,
         })
     }
 

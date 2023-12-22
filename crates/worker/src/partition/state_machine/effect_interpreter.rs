@@ -13,6 +13,7 @@ use super::{Effects, Error};
 use crate::partition::services::non_deterministic;
 use crate::partition::state_machine::actions::Action;
 use crate::partition::state_machine::effects::Effect;
+use crate::partition::types::InvokerJournalEntry;
 use crate::partition::{CommitError, Committable};
 use bytes::Bytes;
 use futures::future::BoxFuture;
@@ -349,6 +350,19 @@ impl<Codec: RawEntryCodec> EffectInterpreter<Codec> {
                 )
                 .await?;
             }
+            Effect::AppendJournalEntries {
+                service_id,
+                previous_invocation_status,
+                journal_entries,
+            } => {
+                Self::append_journal_entries(
+                    state_storage,
+                    service_id,
+                    previous_invocation_status,
+                    journal_entries,
+                )
+                .await?;
+            }
             Effect::TruncateOutbox(outbox_sequence_number) => {
                 state_storage
                     .truncate_outbox(outbox_sequence_number)
@@ -587,6 +601,47 @@ impl<Codec: RawEntryCodec> EffectInterpreter<Codec> {
             journal_meta.length, entry_index,
             "journal should not have gaps"
         );
+        journal_meta.length = entry_index + 1;
+
+        // Update timestamps
+        previous_invocation_status.update_timestamps();
+
+        // Store invocation status
+        state_storage
+            .store_invocation_status(&service_id, previous_invocation_status)
+            .await?;
+
+        Ok(())
+    }
+
+    async fn append_journal_entries<S: StateStorage>(
+        state_storage: &mut S,
+        service_id: ServiceId,
+        mut previous_invocation_status: InvocationStatus,
+        journal_entries: Vec<InvokerJournalEntry>,
+    ) -> Result<(), Error> {
+        // update the journal metadata length
+        let journal_meta = previous_invocation_status
+            .get_journal_metadata_mut()
+            .expect("At this point there must be a journal");
+
+        let mut entry_index = journal_meta.length - 1;
+
+        for journal_entry in journal_entries {
+            debug_assert_eq!(
+                entry_index + 1,
+                journal_entry.entry_index,
+                "journal should not have gaps"
+            );
+
+            entry_index = journal_entry.entry_index;
+            let journal_entry = journal_entry.entry;
+            // Store journal entry
+            state_storage
+                .store_journal_entry(&service_id, entry_index, journal_entry)
+                .await?;
+        }
+
         journal_meta.length = entry_index + 1;
 
         // Update timestamps

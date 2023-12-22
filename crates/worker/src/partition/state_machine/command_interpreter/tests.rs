@@ -8,6 +8,7 @@ use futures::{stream, FutureExt};
 use googletest::matcher::Matcher;
 use googletest::{all, any, assert_that, pat, unordered_elements_are};
 use restate_invoker_api::EffectKind;
+use restate_invoker_api::JournalEntry as InvokerJournalEntry;
 use restate_service_protocol::awakeable_id::AwakeableIdentifier;
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_storage_api::status_table::{JournalMetadata, StatusTimestamps};
@@ -266,10 +267,10 @@ async fn awakeable_with_success() {
     ));
     let cmd = Command::Invoker(InvokerEffect {
         full_invocation_id: sid_caller.clone(),
-        kind: EffectKind::JournalEntry {
+        kind: EffectKind::JournalEntry(InvokerJournalEntry {
             entry_index: 1,
             entry,
-        },
+        }),
     });
 
     state_reader.register_invoked_status(
@@ -321,10 +322,10 @@ async fn awakeable_with_failure() {
     ));
     let cmd = Command::Invoker(InvokerEffect {
         full_invocation_id: sid_caller.clone(),
-        kind: EffectKind::JournalEntry {
+        kind: EffectKind::JournalEntry(InvokerJournalEntry {
             entry_index: 1,
             entry,
-        },
+        }),
     });
 
     state_reader.register_invoked_status(
