@@ -15,6 +15,7 @@ use bytes::BytesMut;
 use restate_types::identifiers::{PartitionId, PartitionKey};
 use std::ops::RangeInclusive;
 
+#[derive(Debug, Clone)]
 pub enum TableScan<K> {
     /// Scan an entire partition of a given table.
     Partition(PartitionId),

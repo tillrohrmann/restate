@@ -30,20 +30,18 @@ use crate::TableKind::{
 use bytes::BytesMut;
 use codederror::CodedError;
 use futures::{ready, FutureExt, Stream};
-use futures_util::future::{ok, ready};
+use futures_util::future::ready;
 use futures_util::{stream, StreamExt};
 use restate_storage_api::{GetFuture, GetStream, PutFuture, Storage, StorageError, Transaction};
 use rocksdb::BlockBasedOptions;
 use rocksdb::Cache;
 use rocksdb::ColumnFamily;
 use rocksdb::DBCompressionType;
-use rocksdb::DBPinnableSlice;
 use rocksdb::DBRawIteratorWithThreadMode;
 use rocksdb::Error;
 use rocksdb::PrefixRange;
 use rocksdb::ReadOptions;
 use rocksdb::SingleThreaded;
-use rocksdb::WriteBatch;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -53,6 +51,8 @@ use tokio::task::JoinHandle;
 
 type DB = rocksdb::DBWithThreadMode<SingleThreaded>;
 pub type DBIterator<'b> = DBRawIteratorWithThreadMode<'b, DB>;
+
+type WriteBatchType = rocksdb::WriteBatchWithIndex;
 
 const STATE_TABLE_NAME: &str = "state";
 const STATUS_TABLE_NAME: &str = "status";
@@ -178,7 +178,10 @@ impl BuildError {
 #[derive(Clone, Debug)]
 pub struct RocksDBStorage {
     db: Arc<DB>,
-    tx: UnboundedSender<(WriteBatch, Sender<std::result::Result<(), StorageError>>)>,
+    tx: UnboundedSender<(
+        WriteBatchType,
+        Sender<std::result::Result<(), StorageError>>,
+    )>,
 }
 
 fn db_options(opts: &Options) -> rocksdb::Options {
@@ -324,7 +327,7 @@ impl RocksDBStorage {
         let rdb = Arc::new(rdb);
 
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(
-            WriteBatch,
+            WriteBatchType,
             Sender<std::result::Result<(), StorageError>>,
         )>();
 
@@ -340,13 +343,6 @@ impl RocksDBStorage {
         self.db.cf_handle(name).expect(
             "This should not happen, this is a Restate bug. Please contact the restate developers.",
         )
-    }
-
-    fn get<K: AsRef<[u8]>>(&self, table: TableKind, key: K) -> Result<Option<DBPinnableSlice>> {
-        let table = self.table_handle(table);
-        self.db
-            .get_pinned_cf(&table, key)
-            .map_err(|error| StorageError::Generic(error.into()))
     }
 
     pub fn prefix_iterator<K: Into<Vec<u8>>>(&self, table: TableKind, prefix: K) -> DBIterator {
@@ -398,7 +394,7 @@ impl RocksDBStorage {
     #[allow(clippy::needless_lifetimes)]
     pub fn transaction(&self) -> RocksDBTransaction {
         RocksDBTransaction {
-            write_batch: Default::default(),
+            write_batch: WriteBatchType::new(512 * 1024, true),
             storage: self,
             key_buffer: Default::default(),
             value_buffer: Default::default(),
@@ -408,7 +404,7 @@ impl RocksDBStorage {
     #[inline]
     async fn commit_write_batch(
         &self,
-        write_batch: WriteBatch,
+        write_batch: WriteBatchType,
     ) -> std::result::Result<(), StorageError> {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -433,7 +429,7 @@ impl Storage for RocksDBStorage {
 }
 
 pub struct RocksDBTransaction<'a> {
-    write_batch: Option<WriteBatch>,
+    write_batch: WriteBatchType,
     storage: &'a RocksDBStorage,
     key_buffer: BytesMut,
     value_buffer: BytesMut,
@@ -486,12 +482,14 @@ impl<'a> RocksDBTransaction<'a> {
         key.serialize_to(&mut buf);
         let buf = buf.split();
 
-        let res = match self.storage.get(K::table(), &buf) {
-            Ok(value) => {
-                let slice = value.as_ref().map(|v| v.as_ref());
-                f(&buf, slice)
-            }
-            Err(err) => Err(err),
+        let res = match self.write_batch.get_from_batch_and_db_cf(
+            self.storage.db.as_ref(),
+            self.storage.table_handle(K::table()),
+            &buf,
+            &ReadOptions::default(),
+        ) {
+            Ok(value) => f(&buf, value.as_ref().map(|v| v.as_ref())),
+            Err(err) => Err(StorageError::Generic(err.into())),
         };
 
         ready(res).boxed()
@@ -500,13 +498,27 @@ impl<'a> RocksDBTransaction<'a> {
     #[inline]
     pub fn get_first_blocking<K, F, R>(&mut self, scan: TableScan<K>, f: F) -> GetFuture<'static, R>
     where
-        K: TableKey + Send + 'static,
+        K: TableKey + Send + 'static + Clone,
         F: FnOnce(Option<(&[u8], &[u8])>) -> Result<R> + Send + 'static,
         R: Send + 'static,
     {
-        let iterator = self.storage.iterator_from(scan);
+        let iterator = self.iterator_from(scan);
         let result = f(iterator.item());
         ready(result).boxed()
+    }
+
+    fn iterator_from<K>(&self, scan: TableScan<K>) -> DBIterator where K: TableKey + Clone {
+        let cf = self.storage.table_handle(scan.table());
+        let seek = match PhysicalScan::from(scan.clone()) {
+            PhysicalScan::Prefix(_, seek) => seek,
+            PhysicalScan::RangeExclusive(_, seek, _) => seek,
+            PhysicalScan::RangeOpen(_, seek) => seek,
+        };
+        let iterator = self.storage.iterator_from(scan);
+        let mut iterator = self.write_batch.iterator_with_base_cf(iterator, cf);
+        iterator.seek(seek);
+        iterator.status().expect("should not happen");
+        iterator
     }
 
     #[inline]
@@ -516,13 +528,13 @@ impl<'a> RocksDBTransaction<'a> {
         mut op: F,
     ) -> GetStream<'static, R>
     where
-        K: TableKey + Send + 'static,
+        K: TableKey + Send + 'static + Clone,
         F: FnMut(&[u8], &[u8]) -> TableScanIterationDecision<R> + Send + 'static,
         R: Send + 'static,
     {
         let mut res = Vec::new();
 
-        let mut iterator = self.storage.iterator_from(scan);
+        let mut iterator = self.iterator_from(scan);
         while let Some((k, v)) = iterator.item() {
             match op(k, v) {
                 TableScanIterationDecision::Emit(result) => {
@@ -603,7 +615,6 @@ impl<'a> RocksDBTransaction<'a> {
     }
 
     fn put_kv<K: TableKey, V: Codec>(&mut self, key: K, value: V) {
-        self.ensure_write_batch();
         {
             let buffer = self.key_buffer(key.serialized_length());
             key.serialize_to(buffer);
@@ -614,29 +625,16 @@ impl<'a> RocksDBTransaction<'a> {
         }
         let table = self.storage.table_handle(K::table());
         self.write_batch
-            .as_mut()
-            .unwrap()
             .put_cf(&table, &self.key_buffer, &self.value_buffer);
     }
 
     fn delete_key<K: TableKey>(&mut self, key: &K) {
-        self.ensure_write_batch();
         {
             let buffer = self.key_buffer(key.serialized_length());
             key.serialize_to(buffer);
         }
         let table = self.storage.table_handle(K::table());
-        self.write_batch
-            .as_mut()
-            .unwrap()
-            .delete_cf(&table, &self.key_buffer);
-    }
-
-    #[inline]
-    fn ensure_write_batch(&mut self) {
-        if self.write_batch.is_none() {
-            self.write_batch = Some(WriteBatch::default());
-        }
+        self.write_batch.delete_cf(&table, &self.key_buffer);
     }
 }
 
@@ -645,10 +643,7 @@ impl<'a> Transaction for RocksDBTransaction<'a> {
     where
         Self: 'b,
     {
-        if self.write_batch.is_none() {
-            return ok(()).boxed();
-        }
-        let write_batch = self.write_batch.unwrap();
+        let write_batch = self.write_batch;
         self.storage.commit_write_batch(write_batch).boxed()
     }
 }
@@ -656,10 +651,10 @@ impl<'a> Transaction for RocksDBTransaction<'a> {
 fn try_write_batch(
     db: &Arc<DB>,
     futures: &mut Vec<Sender<std::result::Result<(), StorageError>>>,
-    batch: WriteBatch,
+    batch: WriteBatchType,
 ) -> bool {
     let result = db
-        .write(batch)
+        .write_wbwi(batch)
         .map_err(|error| StorageError::Generic(error.into()));
     if result.is_ok() {
         return true;
@@ -679,7 +674,10 @@ fn try_write_batch(
 
 fn commit_loop(
     db: Arc<DB>,
-    mut rx: UnboundedReceiver<(WriteBatch, Sender<std::result::Result<(), StorageError>>)>,
+    mut rx: UnboundedReceiver<(
+        WriteBatchType,
+        Sender<std::result::Result<(), StorageError>>,
+    )>,
 ) {
     let mut replies: Vec<Sender<std::result::Result<(), StorageError>>> = Vec::new();
     'out: while let Some((batch, reply)) = rx.blocking_recv() {

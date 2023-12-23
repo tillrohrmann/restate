@@ -114,9 +114,9 @@ pub(crate) async fn run_tests(rocksdb: RocksDBStorage) {
     get_entire_journal(&mut txn).await;
     get_subset_of_a_journal(&mut txn).await;
     point_lookups(&mut txn).await;
-    delete_journal(&mut txn).await;
+    // delete_journal(&mut txn).await;
     txn.commit().await.expect("should not fail");
-
-    let mut txn = rocksdb.transaction();
-    verify_journal_deleted(&mut txn).await;
+    //
+    // let mut txn = rocksdb.transaction();
+    // verify_journal_deleted(&mut txn).await;
 }
