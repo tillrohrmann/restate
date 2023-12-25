@@ -16,7 +16,7 @@ use crate::partition::state_machine::{
 use crate::partition::storage::{PartitionStorage, Transaction};
 use crate::util::IdentitySender;
 use futures::future::BoxFuture;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use restate_schema_impl::Schemas;
 use restate_storage_rocksdb::RocksDBStorage;
 use restate_types::identifiers::{PartitionId, PartitionKey, PeerId};
@@ -146,6 +146,7 @@ where
             Self::create_state_machine::<RawEntryCodec, _>(&partition_storage).await?;
 
         let actuator_output_handler = ActionEffectHandler::new(proposal_tx);
+        let mut actuator_output_buffer = Vec::with_capacity(64);
 
         loop {
             tokio::select! {
@@ -209,13 +210,23 @@ where
                     }
                 },
                 actuator_output = actuator_stream.next() => {
+                    actuator_output_buffer.clear();
                     let actuator_output = actuator_output.ok_or(anyhow::anyhow!("actuator stream is closed"))?;
-                    actuator_output_handler.handle(actuator_output).await;
+
+                    actuator_output_buffer.push(actuator_output);
+
+                    while let Some(Some(actuator_output)) = actuator_stream.next().now_or_never() {
+                        actuator_output_buffer.push(actuator_output);
+                    }
+
+                    actuator_output_handler.handle(&mut actuator_output_buffer).await;
                 },
                 task_result = leadership_state.run_tasks() => {
                     match task_result {
                         TaskResult::Timer(timer) => {
-                            actuator_output_handler.handle(ActionEffect::Timer(timer)).await;
+                            actuator_output_buffer.clear();
+                            actuator_output_buffer.push(ActionEffect::Timer(timer));
+                            actuator_output_handler.handle(&mut actuator_output_buffer).await;
                         },
                         TaskResult::TerminatedTask(result) => {
                             Err(result)?

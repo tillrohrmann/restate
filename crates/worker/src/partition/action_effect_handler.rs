@@ -23,41 +23,38 @@ impl ActionEffectHandler {
         Self { proposal_tx }
     }
 
-    pub(super) async fn handle(&self, actuator_output: ActionEffect) {
-        match actuator_output {
-            ActionEffect::Invoker(invoker_output) => {
-                // Err only if the consensus module is shutting down
-                let _ = self
-                    .proposal_tx
-                    .send(AckCommand::no_ack(Command::Invoker(invoker_output)))
-                    .await;
-            }
+    pub(super) async fn handle(&self, actuator_output_buffer: &mut Vec<ActionEffect>) {
+        let ack_command = if actuator_output_buffer.len() == 1 {
+            AckCommand::no_ack(Self::map_action_to_command(
+                actuator_output_buffer
+                    .drain(..)
+                    .next()
+                    .expect("one element needs to be present"),
+            ))
+        } else {
+            let commands = actuator_output_buffer
+                .drain(..)
+                .map(Self::map_action_to_command)
+                .collect::<Vec<_>>();
+
+            AckCommand::no_ack(commands)
+        };
+
+        // Err only if the consensus module is shutting down
+        let _ = self.proposal_tx.send(ack_command).await;
+    }
+
+    fn map_action_to_command(action: ActionEffect) -> Command {
+        match action {
+            ActionEffect::Invoker(invoker_output) => Command::Invoker(invoker_output),
             ActionEffect::Shuffle(outbox_truncation) => {
-                // Err only if the consensus module is shutting down
-                let _ = self
-                    .proposal_tx
-                    .send(AckCommand::no_ack(Command::OutboxTruncation(
-                        outbox_truncation.index(),
-                    )))
-                    .await;
+                Command::OutboxTruncation(outbox_truncation.index())
             }
-            ActionEffect::Timer(timer) => {
-                // Err only if the consensus module is shutting down
-                let _ = self
-                    .proposal_tx
-                    .send(AckCommand::no_ack(Command::Timer(timer)))
-                    .await;
-            }
+            ActionEffect::Timer(timer) => Command::Timer(timer),
             ActionEffect::BuiltInInvoker(invoker_output) => {
                 let (fid, effects) = invoker_output.into_inner();
-                // Err only if the consensus module is shutting down
-                let _ = self
-                    .proposal_tx
-                    .send(AckCommand::no_ack(Command::BuiltInInvoker(
-                        NBISEffects::new(fid, effects),
-                    )))
-                    .await;
+                Command::BuiltInInvoker(NBISEffects::new(fid, effects))
             }
-        };
+        }
     }
 }
