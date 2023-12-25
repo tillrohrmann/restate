@@ -47,7 +47,7 @@ where
         mut message_collector: Collector,
         is_leader: bool,
     ) -> Result<InterpretationResult<Transaction<TransactionType>, Collector>, Error> {
-        let (fsm_command, ack_mode) = command.into_inner();
+        let (fsm_commands, ack_mode) = command.into_inner();
 
         match ack_mode {
             AckMode::Ack(ack_target) => {
@@ -93,7 +93,7 @@ where
 
         self.inner
             .apply(
-                fsm_command,
+                fsm_commands,
                 effects,
                 transaction,
                 message_collector,

@@ -17,7 +17,7 @@ use restate_types::message::{AckKind, MessageIndex};
 /// Envelope for [`partition::Command`] that might require an explicit acknowledge.
 #[derive(Debug)]
 pub struct AckCommand {
-    cmd: Command,
+    cmds: Commands,
     ack_mode: AckMode,
 }
 
@@ -30,32 +30,32 @@ pub enum AckMode {
 
 impl AckCommand {
     /// Create a command that requires an acknowledgement upon reception.
-    pub fn ack(cmd: Command, ack_target: AckTarget) -> Self {
+    pub fn ack(cmds: impl Into<Commands>, ack_target: AckTarget) -> Self {
         Self {
-            cmd,
+            cmds: cmds.into(),
             ack_mode: AckMode::Ack(ack_target),
         }
     }
 
     /// Create a command that should be de-duplicated with respect to the `producer_id` and the
     /// `seq_number` by the receiver.
-    pub fn dedup(cmd: Command, deduplication_source: DeduplicationSource) -> Self {
+    pub fn dedup(cmds: impl Into<Commands>, deduplication_source: DeduplicationSource) -> Self {
         Self {
-            cmd,
+            cmds: cmds.into(),
             ack_mode: AckMode::Dedup(deduplication_source),
         }
     }
 
     /// Create a command that should not be acknowledged.
-    pub fn no_ack(cmd: Command) -> Self {
+    pub fn no_ack(cmds: impl Into<Commands>) -> Self {
         Self {
-            cmd,
+            cmds: cmds.into(),
             ack_mode: AckMode::None,
         }
     }
 
-    pub fn into_inner(self) -> (Command, AckMode) {
-        (self.cmd, self.ack_mode)
+    pub fn into_inner(self) -> (Commands, AckMode) {
+        (self.cmds, self.ack_mode)
     }
 }
 
@@ -209,4 +209,50 @@ pub enum Command {
     Invocation(ServiceInvocation),
     Response(InvocationResponse),
     BuiltInInvoker(NBISEffects),
+}
+
+#[derive(Debug)]
+pub enum Commands {
+    Single(Command),
+    Multiple(Vec<Command>),
+}
+
+impl From<Command> for Commands {
+    fn from(command: Command) -> Self {
+        Commands::Single(command)
+    }
+}
+
+impl From<Vec<Command>> for Commands {
+    fn from(commands: Vec<Command>) -> Self {
+        Commands::Multiple(commands)
+    }
+}
+
+impl IntoIterator for Commands {
+    type Item = Command;
+    type IntoIter = CommandsIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match self {
+            Commands::Single(command) => CommandsIter::Single(std::iter::once(command)),
+            Commands::Multiple(commands) => CommandsIter::Multiple(commands.into_iter()),
+        }
+    }
+}
+
+pub enum CommandsIter {
+    Single(std::iter::Once<Command>),
+    Multiple(std::vec::IntoIter<Command>),
+}
+
+impl Iterator for CommandsIter {
+    type Item = Command;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            CommandsIter::Single(iter) => iter.next(),
+            CommandsIter::Multiple(iter) => iter.next(),
+        }
+    }
 }

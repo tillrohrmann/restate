@@ -19,6 +19,7 @@ mod dedup;
 mod effect_interpreter;
 mod effects;
 
+use crate::partition::state_machine::commands::Commands;
 pub use actions::Action;
 pub use command_interpreter::StateReader;
 pub use commands::{
@@ -54,25 +55,31 @@ impl<Codec: RawEntryCodec> StateMachine<Codec> {
         Collector: ActionCollector,
     >(
         &mut self,
-        command: Command,
+        commands: Commands,
         effects: &mut Effects,
         mut transaction: Transaction<TransactionType>,
-        message_collector: Collector,
+        mut message_collector: Collector,
         is_leader: bool,
     ) -> Result<InterpretationResult<Transaction<TransactionType>, Collector>, Error> {
-        // Handle the command, returns the span_relation to use to log effects
-        let (fid, span_relation) = self.0.on_apply(command, effects, &mut transaction).await?;
+        for command in commands {
+            // Handle the command, returns the span_relation to use to log effects
+            let (fid, span_relation) = self.0.on_apply(command, effects, &mut transaction).await?;
 
-        // Log the effects
-        effects.log(is_leader, fid, span_relation);
+            // Log the effects
+            effects.log(is_leader, fid, span_relation);
 
-        // Interpret effects
-        effect_interpreter::EffectInterpreter::<Codec>::interpret_effects(
-            effects,
-            transaction,
-            message_collector,
-        )
-        .await
+            // Interpret effects
+            (transaction, message_collector) =
+                effect_interpreter::EffectInterpreter::<Codec>::interpret_effects(
+                    effects,
+                    transaction,
+                    message_collector,
+                )
+                .await?
+                .into_inner();
+        }
+
+        Ok(InterpretationResult::new(transaction, message_collector))
     }
 }
 
@@ -157,12 +164,12 @@ mod tests {
             }
         }
 
-        pub async fn apply(&mut self, command: Command) -> Vec<Action> {
+        pub async fn apply(&mut self, commands: impl Into<Commands>) -> Vec<Action> {
             let transaction = self.rocksdb_storage.transaction();
             let partition_id = self.partition_id();
             self.state_machine
                 .apply(
-                    command,
+                    commands.into(),
                     &mut self.effects_buffer,
                     crate::partition::storage::Transaction::new(
                         partition_id,
