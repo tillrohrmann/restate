@@ -142,7 +142,7 @@ impl<'a> StatusTable for RocksDBTransaction<'a> {
         &mut self,
         partition_key_range: RangeInclusive<PartitionKey>,
     ) -> GetStream<FullInvocationId> {
-        self.for_each_key_value(
+        self.for_each_key_value_in_place(
             PartitionKeyRange::<StatusKey>(partition_key_range),
             |k, v| {
                 let result = decode_status_key_value(k, v).transpose();

@@ -54,7 +54,7 @@ impl<'a> FsmTable for RocksDBTransaction<'a> {
     }
 
     fn get_all_states(&mut self, partition_id: PartitionId) -> GetStream<(u64, Bytes)> {
-        self.for_each_key_value(
+        self.for_each_key_value_in_place(
             TableScan::Partition::<PartitionStateMachineKey>(partition_id),
             move |k, v| {
                 let res = decode_key_value(k, v);
