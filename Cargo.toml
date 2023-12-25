@@ -101,7 +101,7 @@ prost-build = "0.12.1"
 prost-reflect = "0.12.0"
 prost-types = "0.12.1"
 rand = "0.8.5"
-rocksdb = "0.21.0"
+rocksdb = { git = "https://github.com/tillrohrmann/rust-rocksdb.git", branch = "master" }
 rustls = "0.21.6"
 schemars = { version = "0.8", features = ["bytes"] }
 serde = { version = "1.0", features = ["derive"] }
