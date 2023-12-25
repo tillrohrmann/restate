@@ -97,7 +97,7 @@ impl<'a> InboxTable for RocksDBTransaction<'a> {
     }
 
     fn all_inboxes(&mut self, range: RangeInclusive<PartitionKey>) -> GetStream<InboxEntry> {
-        self.for_each_key_value(TableScan::PartitionKeyRange::<InboxKey>(range), |k, v| {
+        self.for_each_key_value_in_place(TableScan::PartitionKeyRange::<InboxKey>(range), |k, v| {
             let inbox_entry = decode_inbox_key_value(k, v);
             TableScanIterationDecision::Emit(inbox_entry)
         })
