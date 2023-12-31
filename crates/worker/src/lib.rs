@@ -21,9 +21,12 @@ use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use partition::shuffle;
 use restate_consensus::Consensus;
+use restate_errors::NotRunningError;
 use restate_ingress_dispatcher::Service as IngressDispatcherService;
 use restate_ingress_kafka::Service as IngressKafkaService;
-use restate_invoker_fake::{Service as FakeInvokerService, ServiceHandle as FakeInvokerServiceHandle};
+use restate_invoker_fake::{
+    Service as FakeInvokerService, ServiceHandle as FakeInvokerServiceHandle,
+};
 use restate_invoker_impl::{
     ChannelServiceHandle as InvokerChannelServiceHandle, Service as InvokerService,
 };
@@ -33,14 +36,15 @@ use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_storage_query_http::service::HTTPQueryService;
 use restate_storage_query_postgres::service::PostgresQueryService;
 use restate_storage_rocksdb::RocksDBStorage;
-use restate_types::identifiers::{EntryIndex, FullInvocationId, IngressDispatcherId, PartitionKey, PartitionLeaderEpoch, PeerId};
+use restate_types::identifiers::{
+    EntryIndex, FullInvocationId, IngressDispatcherId, PartitionKey, PartitionLeaderEpoch, PeerId,
+};
 use restate_types::message::PeerTarget;
 use std::ops::RangeInclusive;
 use tokio::join;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tracing::debug;
-use restate_errors::NotRunningError;
 use util::IdentitySender;
 
 mod ingress_integration;
@@ -449,9 +453,7 @@ impl Worker {
             .into();
         let mut storage_query_http_handle: OptionFuture<_> = self
             .storage_query_http
-            .map(|storage_query_http| {
-                tokio::spawn(storage_query_http.run(shutdown_watch.clone()))
-            })
+            .map(|storage_query_http| tokio::spawn(storage_query_http.run(shutdown_watch.clone())))
             .into();
         let mut consensus_handle = tokio::spawn(self.consensus.run());
         let mut processors_handles: FuturesUnordered<_> = self
