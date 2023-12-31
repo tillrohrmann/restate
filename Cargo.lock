@@ -4733,6 +4733,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "restate-invoker-fake"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "codederror",
+ "drain",
+ "futures",
+ "humantime",
+ "itertools 0.11.0",
+ "prost 0.12.3",
+ "restate-errors",
+ "restate-futures-util",
+ "restate-invoker-api",
+ "restate-service-protocol",
+ "restate-types",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "restate-invoker-impl"
 version = "0.7.0"
 dependencies = [
@@ -5285,6 +5307,7 @@ dependencies = [
  "restate-ingress-grpc",
  "restate-ingress-kafka",
  "restate-invoker-api",
+ "restate-invoker-fake",
  "restate-invoker-impl",
  "restate-network",
  "restate-pb",

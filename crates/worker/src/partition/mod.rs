@@ -10,7 +10,9 @@
 
 use crate::partition::action_effect_handler::ActionEffectHandler;
 use crate::partition::leadership::{ActionEffect, LeadershipState, TaskResult};
-use crate::partition::state_machine::{AckCommand, ActionCollector, DeduplicatingStateMachine, Effects, InterpretationResult};
+use crate::partition::state_machine::{
+    AckCommand, ActionCollector, DeduplicatingStateMachine, Effects, InterpretationResult,
+};
 use crate::partition::storage::{PartitionStorage, Transaction};
 use crate::util::IdentitySender;
 use futures::future::BoxFuture;

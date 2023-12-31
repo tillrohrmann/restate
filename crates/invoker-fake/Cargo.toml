@@ -1,0 +1,29 @@
+[package]
+name = "restate-invoker-fake"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = []
+
+[dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
+codederror = { workspace = true }
+drain = { workspace = true }
+futures = { workspace = true }
+humantime = { workspace = true }
+itertools = { workspace = true }
+prost = { workspace = true }
+restate-errors = { workspace = true }
+restate-futures-util = { workspace = true }
+restate-invoker-api = { workspace = true }
+restate-service-protocol = { workspace = true, features = ["protocol"] }
+restate-types = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

@@ -16,12 +16,14 @@ use crate::partition::storage::invoker::InvokerStorageReader;
 use crate::partitioning_scheme::FixedConsecutivePartitions;
 use crate::services::Services;
 use codederror::CodedError;
+use futures::future::OptionFuture;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use partition::shuffle;
 use restate_consensus::Consensus;
 use restate_ingress_dispatcher::Service as IngressDispatcherService;
 use restate_ingress_kafka::Service as IngressKafkaService;
+use restate_invoker_fake::{Service as FakeInvokerService, ServiceHandle as FakeInvokerServiceHandle};
 use restate_invoker_impl::{
     ChannelServiceHandle as InvokerChannelServiceHandle, Service as InvokerService,
 };
@@ -31,12 +33,14 @@ use restate_service_protocol::codec::ProtobufRawEntryCodec;
 use restate_storage_query_http::service::HTTPQueryService;
 use restate_storage_query_postgres::service::PostgresQueryService;
 use restate_storage_rocksdb::RocksDBStorage;
-use restate_types::identifiers::{IngressDispatcherId, PartitionKey, PeerId};
+use restate_types::identifiers::{EntryIndex, FullInvocationId, IngressDispatcherId, PartitionKey, PartitionLeaderEpoch, PeerId};
 use restate_types::message::PeerTarget;
 use std::ops::RangeInclusive;
 use tokio::join;
 use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
 use tracing::debug;
+use restate_errors::NotRunningError;
 use util::IdentitySender;
 
 mod ingress_integration;
@@ -56,6 +60,7 @@ pub use restate_ingress_kafka::{
     Options as KafkaIngressOptions, OptionsBuilder as KafkaIngressOptionsBuilder,
     OptionsBuilderError as KafkaIngressOptionsBuilderError,
 };
+use restate_invoker_api::{Effect, InvokeInputJournal};
 pub use restate_invoker_impl::{
     Options as InvokerOptions, OptionsBuilder as InvokerOptionsBuilder,
     OptionsBuilderError as InvokerOptionsBuilderError,
@@ -85,13 +90,14 @@ pub use restate_storage_query_postgres::{
     Options as StorageQueryPostgresOptions, OptionsBuilder as StorageQueryPostgresOptionsBuilder,
     OptionsBuilderError as StorageQueryPostgresOptionsBuilderError,
 };
+use restate_types::journal::Completion;
 
 type PartitionProcessorCommand = partition::StateMachineAckCommand;
 type ConsensusCommand = restate_consensus::Command<PartitionProcessorCommand>;
 type ConsensusMsg = PeerTarget<PartitionProcessorCommand>;
 type PartitionProcessor = partition::PartitionProcessor<
     ProtobufRawEntryCodec,
-    InvokerChannelServiceHandle,
+    InvokerServiceHandleWrapper,
     UnboundedNetworkHandle<shuffle::ShuffleInput, shuffle::ShuffleOutput>,
 >;
 
@@ -122,6 +128,8 @@ pub struct Options {
     /// Note: This config entry **will be removed** in future Restate releases,
     /// as the partitions number will be dynamically configured depending on the load.
     partitions: u64,
+
+    fake_invoker: bool,
 }
 
 impl Default for Options {
@@ -137,6 +145,7 @@ impl Default for Options {
             kafka: Default::default(),
             invoker: Default::default(),
             partitions: 1024,
+            fake_invoker: false,
         }
     }
 }
@@ -214,15 +223,18 @@ pub struct Worker {
     consensus: Consensus<PartitionProcessorCommand>,
     processors: Vec<PartitionProcessor>,
     network: network_integration::Network,
-    storage_query_postgres: PostgresQueryService,
-    storage_query_http: HTTPQueryService,
+    storage_query_postgres: Option<PostgresQueryService>,
+    storage_query_http: Option<HTTPQueryService>,
     #[allow(clippy::type_complexity)]
-    invoker: InvokerService<
-        InvokerStorageReader<RocksDBStorage>,
-        InvokerStorageReader<RocksDBStorage>,
-        EntryEnricher<Schemas, ProtobufRawEntryCodec>,
-        Schemas,
+    invoker: Option<
+        InvokerService<
+            InvokerStorageReader<RocksDBStorage>,
+            InvokerStorageReader<RocksDBStorage>,
+            EntryEnricher<Schemas, ProtobufRawEntryCodec>,
+            Schemas,
+        >,
     >,
+    fake_invoker: Option<FakeInvokerService<InvokerStorageReader<RocksDBStorage>>>,
     external_client_ingress_runner: ExternalClientIngressRunner,
     ingress_kafka: IngressKafkaService,
     services: Services<FixedConsecutivePartitions>,
@@ -290,27 +302,50 @@ impl Worker {
         let rocksdb = storage_rocksdb.build()?;
 
         let invoker_storage_reader = InvokerStorageReader::new(rocksdb.clone());
-        let invoker = opts.invoker.build(
-            invoker_storage_reader.clone(),
-            invoker_storage_reader,
-            EntryEnricher::new(schemas.clone()),
-            schemas.clone(),
-        );
 
-        let query_context = storage_query_datafusion.build(
-            rocksdb.clone(),
-            invoker.status_reader(),
-            schemas.clone(),
-        )?;
-        let storage_query_http = storage_query_http.build(query_context.clone());
-        let storage_query_postgres = storage_query_postgres.build(query_context);
+        let (fake_invoker, invoker, storage_query_http, storage_query_postgres) =
+            if opts.fake_invoker {
+                (
+                    Some(FakeInvokerService::new(invoker_storage_reader.clone())),
+                    None,
+                    None,
+                    None,
+                )
+            } else {
+                let invoker = opts.invoker.build(
+                    invoker_storage_reader.clone(),
+                    invoker_storage_reader,
+                    EntryEnricher::new(schemas.clone()),
+                    schemas.clone(),
+                );
+
+                let query_context = storage_query_datafusion.build(
+                    rocksdb.clone(),
+                    invoker.status_reader(),
+                    schemas.clone(),
+                )?;
+                let storage_query_http = storage_query_http.build(query_context.clone());
+                let storage_query_postgres = storage_query_postgres.build(query_context);
+
+                (
+                    None,
+                    Some(invoker),
+                    Some(storage_query_http),
+                    Some(storage_query_postgres),
+                )
+            };
 
         let partitioner = partition_table.partitioner();
 
         let (command_senders, processors): (Vec<_>, Vec<_>) = partitioner
             .map(|(idx, partition_range)| {
                 let proposal_sender = consensus.create_proposal_sender();
-                let invoker_sender = invoker.handle();
+
+                let invoker_sender = if invoker.is_some() {
+                    InvokerServiceHandleWrapper::Invoker(invoker.as_ref().unwrap().handle())
+                } else {
+                    InvokerServiceHandleWrapper::Faker(fake_invoker.as_ref().unwrap().handle())
+                };
 
                 Self::create_partition_processor(
                     idx,
@@ -343,6 +378,7 @@ impl Worker {
             storage_query_postgres,
             storage_query_http,
             invoker,
+            fake_invoker,
             external_client_ingress_runner: ExternalClientIngressRunner::new(
                 ingress_dispatcher_service,
                 external_client_ingress,
@@ -360,7 +396,7 @@ impl Worker {
         timer_service_options: restate_timer::Options,
         channel_size: usize,
         proposal_sender: mpsc::Sender<ConsensusMsg>,
-        invoker_sender: InvokerChannelServiceHandle,
+        invoker_sender: InvokerServiceHandleWrapper,
         network_handle: UnboundedNetworkHandle<shuffle::ShuffleInput, shuffle::ShuffleOutput>,
         ack_sender: PartitionProcessorSender<partition::StateMachineAckResponse>,
         rocksdb_storage: RocksDBStorage,
@@ -396,12 +432,27 @@ impl Worker {
             self.external_client_ingress_runner
                 .run(shutdown_watch.clone()),
         );
-        let mut invoker_handle = tokio::spawn(self.invoker.run(shutdown_watch.clone()));
+        let mut invoker_handle: OptionFuture<_> = self
+            .invoker
+            .map(|invoker| tokio::spawn(invoker.run(shutdown_watch.clone())))
+            .into();
+        let mut fake_invoker_handle: OptionFuture<_> = self
+            .fake_invoker
+            .map(|invoker| tokio::spawn(invoker.run(shutdown_watch.clone())))
+            .into();
         let mut network_handle = tokio::spawn(self.network.run(shutdown_watch.clone()));
-        let mut storage_query_postgres_handle =
-            tokio::spawn(self.storage_query_postgres.run(shutdown_watch.clone()));
-        let mut storage_query_http_handle =
-            tokio::spawn(self.storage_query_http.run(shutdown_watch.clone()));
+        let mut storage_query_postgres_handle: OptionFuture<_> = self
+            .storage_query_postgres
+            .map(|storage_query_postgres| {
+                tokio::spawn(storage_query_postgres.run(shutdown_watch.clone()))
+            })
+            .into();
+        let mut storage_query_http_handle: OptionFuture<_> = self
+            .storage_query_http
+            .map(|storage_query_http| {
+                tokio::spawn(storage_query_http.run(shutdown_watch.clone()))
+            })
+            .into();
         let mut consensus_handle = tokio::spawn(self.consensus.run());
         let mut processors_handles: FuturesUnordered<_> = self
             .processors
@@ -434,19 +485,23 @@ impl Worker {
 
                 debug!("Completed shutdown of worker");
             },
-            invoker_result = &mut invoker_handle => {
+            Some(invoker_result) = &mut invoker_handle => {
                 invoker_result.map_err(|err| Error::component_panic("invoker", err))?;
                 panic!("Unexpected termination of invoker.");
+            },
+            Some(fake_invoker_result) = &mut fake_invoker_handle => {
+                fake_invoker_result.map_err(|err| Error::component_panic("invoker", err))?;
+                panic!("Unexpected termination of fake_invoker.");
             },
             network_result = &mut network_handle => {
                 network_result.map_err(|err| Error::component_panic("network", err))??;
                 panic!("Unexpected termination of network.");
             },
-            storage_query_http_result = &mut storage_query_http_handle => {
+            Some(storage_query_http_result) = &mut storage_query_http_handle => {
                 storage_query_http_result.map_err(|err| Error::component_panic("http storage query", err))??;
                 panic!("Unexpected termination of http storage query.");
             },
-            storage_query_postgres_result = &mut storage_query_postgres_handle => {
+            Some(storage_query_postgres_result) = &mut storage_query_postgres_handle => {
                 storage_query_postgres_result.map_err(|err| Error::component_panic("postgres storage query", err))??;
                 panic!("Unexpected termination of postgres storage query.");
             },
@@ -478,5 +533,117 @@ impl Worker {
         }
 
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+enum InvokerServiceHandleWrapper {
+    Invoker(InvokerChannelServiceHandle),
+    Faker(FakeInvokerServiceHandle),
+}
+
+impl restate_invoker_api::ServiceHandle for InvokerServiceHandleWrapper {
+    type Future = futures::future::Ready<Result<(), NotRunningError>>;
+
+    fn invoke(
+        &mut self,
+        partition: PartitionLeaderEpoch,
+        full_invocation_id: FullInvocationId,
+        journal: InvokeInputJournal,
+    ) -> Self::Future {
+        match self {
+            InvokerServiceHandleWrapper::Invoker(handle) => {
+                handle.invoke(partition, full_invocation_id, journal)
+            }
+            InvokerServiceHandleWrapper::Faker(handle) => {
+                handle.invoke(partition, full_invocation_id, journal)
+            }
+        }
+    }
+
+    fn resume(
+        &mut self,
+        partition: PartitionLeaderEpoch,
+        full_invocation_id: FullInvocationId,
+        journal: InvokeInputJournal,
+    ) -> Self::Future {
+        match self {
+            InvokerServiceHandleWrapper::Invoker(handle) => {
+                handle.resume(partition, full_invocation_id, journal)
+            }
+            InvokerServiceHandleWrapper::Faker(handle) => {
+                handle.resume(partition, full_invocation_id, journal)
+            }
+        }
+    }
+
+    fn notify_completion(
+        &mut self,
+        partition: PartitionLeaderEpoch,
+        full_invocation_id: FullInvocationId,
+        completion: Completion,
+    ) -> Self::Future {
+        match self {
+            InvokerServiceHandleWrapper::Invoker(handle) => {
+                handle.notify_completion(partition, full_invocation_id, completion)
+            }
+            InvokerServiceHandleWrapper::Faker(handle) => {
+                handle.notify_completion(partition, full_invocation_id, completion)
+            }
+        }
+    }
+
+    fn notify_stored_entry_ack(
+        &mut self,
+        partition: PartitionLeaderEpoch,
+        full_invocation_id: FullInvocationId,
+        entry_index: EntryIndex,
+    ) -> Self::Future {
+        match self {
+            InvokerServiceHandleWrapper::Invoker(handle) => {
+                handle.notify_stored_entry_ack(partition, full_invocation_id, entry_index)
+            }
+            InvokerServiceHandleWrapper::Faker(handle) => {
+                handle.notify_stored_entry_ack(partition, full_invocation_id, entry_index)
+            }
+        }
+    }
+
+    fn abort_all_partition(&mut self, partition: PartitionLeaderEpoch) -> Self::Future {
+        match self {
+            InvokerServiceHandleWrapper::Invoker(handle) => handle.abort_all_partition(partition),
+            InvokerServiceHandleWrapper::Faker(handle) => handle.abort_all_partition(partition),
+        }
+    }
+
+    fn abort_invocation(
+        &mut self,
+        partition_leader_epoch: PartitionLeaderEpoch,
+        full_invocation_id: FullInvocationId,
+    ) -> Self::Future {
+        match self {
+            InvokerServiceHandleWrapper::Invoker(handle) => {
+                handle.abort_invocation(partition_leader_epoch, full_invocation_id)
+            }
+            InvokerServiceHandleWrapper::Faker(handle) => {
+                handle.abort_invocation(partition_leader_epoch, full_invocation_id)
+            }
+        }
+    }
+
+    fn register_partition(
+        &mut self,
+        partition: PartitionLeaderEpoch,
+        partition_key_range: RangeInclusive<PartitionKey>,
+        sender: Sender<Effect>,
+    ) -> Self::Future {
+        match self {
+            InvokerServiceHandleWrapper::Invoker(handle) => {
+                handle.register_partition(partition, partition_key_range, sender)
+            }
+            InvokerServiceHandleWrapper::Faker(handle) => {
+                handle.register_partition(partition, partition_key_range, sender)
+            }
+        }
     }
 }
