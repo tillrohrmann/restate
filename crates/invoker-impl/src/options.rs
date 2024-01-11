@@ -79,6 +79,8 @@ pub struct Options {
     /// # Message size limit
     ///
     /// Threshold to fail the invocation in case protocol messages coming from a service are larger than the specified amount.
+    #[serde_as(as = "serde_with::NoneAsEmptyString")]
+    #[cfg_attr(feature = "options_schema", schemars(with = "Option<usize>"))]
     message_size_limit: Option<usize>,
 
     /// # Temporary directory
@@ -90,6 +92,8 @@ pub struct Options {
     /// # Concurrency limit
     ///
     /// Number of concurrent invocations that can be processed by the invoker.
+    #[serde_as(as = "serde_with::NoneAsEmptyString")]
+    #[cfg_attr(feature = "options_schema", schemars(with = "Option<usize>"))]
     concurrency_limit: Option<usize>,
 
     service_client: ServiceClientOptions,

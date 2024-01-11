@@ -15,9 +15,11 @@ use restate_invoker_api::StatusHandle;
 use restate_schema_api::deployment::DeploymentMetadataResolver;
 use restate_schema_api::service::ServiceMetadataResolver;
 use restate_storage_rocksdb::RocksDBStorage;
+use serde_with::serde_as;
 use std::fmt::Debug;
 
 /// # Storage query datafusion options
+#[serde_as]
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize, derive_builder::Builder)]
 #[cfg_attr(feature = "options_schema", derive(schemars::JsonSchema))]
 #[cfg_attr(
@@ -29,16 +31,22 @@ pub struct Options {
     /// # Memory limit
     ///
     /// The total memory in bytes that can be used to preform sql queries
+    #[serde_as(as = "serde_with::NoneAsEmptyString")]
+    #[cfg_attr(feature = "options_schema", schemars(with = "Option<usize>"))]
     pub memory_limit: Option<usize>,
 
     /// # Temp folder to use for spill
     ///
     /// The path to spill to
+    #[serde_as(as = "serde_with::NoneAsEmptyString")]
+    #[cfg_attr(feature = "options_schema", schemars(with = "Option<String>"))]
     pub temp_folder: Option<String>,
 
     /// # Default query parallelism
     ///
     /// The number of parallel partitions to use for a query execution
+    #[serde_as(as = "serde_with::NoneAsEmptyString")]
+    #[cfg_attr(feature = "options_schema", schemars(with = "Option<usize>"))]
     pub query_parallelism: Option<usize>,
 }
 

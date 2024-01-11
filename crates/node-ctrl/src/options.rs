@@ -28,7 +28,7 @@ pub struct Options {
     ///
     /// The duration after which a histogram is considered idle and will be removed from
     /// metric responses to save memory. Unsetting means that histograms will never be removed.
-    #[serde(with = "serde_with::As::<Option<serde_with::DisplayFromStr>>")]
+    #[serde_as(as = "serde_with::NoneAsEmptyString")]
     #[cfg_attr(feature = "options_schema", schemars(with = "Option<String>"))]
     pub histogram_inactivity_timeout: Option<humantime::Duration>,
 

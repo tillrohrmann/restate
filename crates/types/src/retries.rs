@@ -112,7 +112,7 @@ pub enum RetryPolicy {
         /// Maximum interval between retries.
         #[cfg_attr(
             feature = "serde",
-            serde(with = "serde_with::As::<Option<serde_with::DisplayFromStr>>")
+            serde(with = "serde_with::As::<serde_with::NoneAsEmptyString>")
         )]
         #[cfg_attr(feature = "serde_schema", schemars(with = "Option<String>"))]
         max_interval: Option<humantime::Duration>,

@@ -9,9 +9,11 @@
 // by the Apache License, Version 2.0.
 
 use crate::service::TimerService;
+use serde_with::serde_as;
 use std::fmt::Debug;
 
 /// # Timer options
+#[serde_as]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, derive_builder::Builder)]
 #[cfg_attr(feature = "options_schema", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "options_schema", schemars(rename = "TimerOptions", default))]
@@ -20,6 +22,8 @@ pub struct Options {
     /// # Num timers in memory limit
     ///
     /// The number of timers in memory limit is used to bound the amount of timers loaded in memory. If this limit is set, when exceeding it, the timers farther in the future will be spilled to disk.
+    #[serde_as(as = "serde_with::NoneAsEmptyString")]
+    #[cfg_attr(feature = "options_schema", schemars(with = "Option<usize>"))]
     num_timers_in_memory_limit: Option<usize>,
 }
 
