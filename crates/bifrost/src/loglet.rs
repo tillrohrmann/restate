@@ -41,7 +41,7 @@ pub fn create_provider(kind: ProviderKind) -> Result<Arc<dyn LogletProvider>, Pr
     derive_more::Into,
     derive_more::Display,
 )]
-pub struct LogletOffset(pub(crate) u64);
+pub struct LogletOffset(pub u64);
 
 impl SequenceNumber for LogletOffset {
     const MAX: Self = LogletOffset(u64::MAX);

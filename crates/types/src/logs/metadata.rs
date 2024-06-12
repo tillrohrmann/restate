@@ -57,7 +57,7 @@ pub struct LogletConfig {
 /// and start-lsn. It's provided by bifrost on loglet creation. This allows the
 /// parameters to be shared between segments and logs if needed.
 #[derive(Debug, Clone, Hash, Eq, PartialEq, derive_more::From, Serialize, Deserialize)]
-pub struct LogletParams(String);
+pub struct LogletParams(pub String);
 
 /// An enum with the list of supported loglet providers.
 #[derive(

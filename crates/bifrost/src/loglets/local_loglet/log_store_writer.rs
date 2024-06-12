@@ -43,7 +43,7 @@ enum DataUpdate {
     PutRecord { offset: LogletOffset, data: Bytes },
 }
 
-pub(crate) struct LogStoreWriter {
+pub struct LogStoreWriter {
     rocksdb: Arc<RocksDb>,
     batch_acks_buf: Vec<Ack>,
     manual_wal_flush: bool,

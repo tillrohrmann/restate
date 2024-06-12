@@ -10,8 +10,8 @@
 
 mod bifrost;
 mod error;
-mod loglet;
-mod loglets;
+pub mod loglet;
+pub mod loglets;
 mod read_stream;
 mod service;
 mod types;

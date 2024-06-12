@@ -1,0 +1,25 @@
+[package]
+name = "restate-dump-bifrost"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+description.workspace = true
+
+[dependencies]
+restate-bifrost = { workspace = true }
+restate-core = { workspace = true }
+restate-rocksdb = { workspace = true }
+restate-types = { workspace = true, features = ["clap"] }
+restate-wal-protocol = { workspace = true }
+
+anyhow = { workspace = true }
+clap = { workspace = true, features = ["derive", "env", "color", "help", "wrap_help", "usage", "suggestions", "error-context", "std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[[bin]]
+name = "restate-dump-bifrost"
+path = "src/main.rs"

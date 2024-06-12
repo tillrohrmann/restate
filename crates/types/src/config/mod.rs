@@ -58,7 +58,7 @@ pub(crate) fn default_arc_tmp() -> std::sync::Arc<tempfile::TempDir> {
 
 static CONFIGURATION: Lazy<Arc<ArcSwap<Configuration>>> = Lazy::new(Arc::default);
 #[cfg(not(any(test, feature = "test-util")))]
-static NODE_BASE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+pub static NODE_BASE_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
 
 #[cfg(any(test, feature = "test-util"))]
 static NODE_BASE_DIR: Lazy<std::sync::RwLock<tempfile::TempDir>> =
