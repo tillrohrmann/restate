@@ -21,7 +21,7 @@ use restate_types::NodeId;
 use restate_wal_protocol::{append_envelope_to_bifrost, Destination, Envelope, Header, Source};
 use std::future::Future;
 use tokio::sync::mpsc;
-use tracing::debug;
+use tracing::{debug, instrument};
 
 #[derive(Debug)]
 pub(crate) struct NewOutboxMessage {
@@ -216,6 +216,7 @@ where
         HintSender::new(self.hint_tx.clone(), self.hint_rx.clone())
     }
 
+    #[instrument(level = "trace", skip_all, fields(partition_id = %self.metadata.partition_id, node_id = %self.metadata.node_id, leader_epoch = %self.metadata.leader_epoch))]
     pub(super) async fn run(self) -> anyhow::Result<()> {
         let Self {
             metadata,
@@ -385,6 +386,7 @@ mod state_machine {
                                             seq_number,
                                             this.metadata,
                                         ));
+                                    trace!("Sending message '{}' after idling", seq_number);
                                     this.state.set(State::Sending(send_future));
                                     break;
                                 }
@@ -396,6 +398,9 @@ mod state_machine {
                                             .expect("outbox reader should be available"),
                                         *this.current_sequence_number,
                                     ));
+                                    trace!(
+                                        "Received hint for pending messages. Reading from storage"
+                                    );
                                     this.state.set(State::ReadingOutbox);
                                     break;
                                 }
@@ -421,8 +426,10 @@ mod state_machine {
                                 wrap_outbox_message_in_envelope(message, seq_number, this.metadata),
                             );
 
+                            trace!("Sending message '{}'", seq_number);
                             this.state.set(State::Sending(send_future));
                         } else {
+                            trace!("No more message to send. Waiting for new messages.");
                             this.state.set(State::Idle);
                         }
                     }
@@ -438,6 +445,10 @@ mod state_machine {
                                 .expect("outbox reader should be available"),
                             *this.current_sequence_number,
                         ));
+                        trace!(
+                            "Successfully sent message '{}'. Reading next message from storage.",
+                            successfully_shuffled_sequence_number
+                        );
                         this.state.set(State::ReadingOutbox);
 
                         return Ok(successfully_shuffled_sequence_number);
