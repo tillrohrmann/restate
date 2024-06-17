@@ -22,6 +22,7 @@ pub mod config;
 pub mod deployment;
 pub mod epoch;
 pub mod errors;
+pub mod fsm;
 pub mod identifiers;
 pub mod ingress;
 pub mod invocation;

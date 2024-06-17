@@ -109,7 +109,9 @@ impl QueryContext {
         crate::inbox::register_self(&ctx, rocksdb.clone())?;
         crate::deployment::register_self(&ctx, schemas.clone())?;
         crate::service::register_self(&ctx, schemas)?;
-        crate::idempotency::register_self(&ctx, rocksdb)?;
+        crate::idempotency::register_self(&ctx, rocksdb.clone())?;
+        crate::outbox::register_self(&ctx, rocksdb.clone())?;
+        crate::fsm::register_self(&ctx, rocksdb)?;
 
         // todo: Fix me
         // we need this now because we can't make new async.

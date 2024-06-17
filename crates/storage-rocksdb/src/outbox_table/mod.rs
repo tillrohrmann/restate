@@ -12,6 +12,7 @@ use crate::keys::{define_table_key, KeyKind, TableKey};
 use crate::TableKind::Outbox;
 use crate::{RocksDBStorage, RocksDBTransaction, StorageAccess, TableScan};
 
+use crate::owned_iter::OwnedIterator;
 use restate_storage_api::outbox_table::{OutboxMessage, OutboxTable};
 use restate_storage_api::{Result, StorageError};
 use restate_types::identifiers::PartitionId;
@@ -53,7 +54,7 @@ fn get_next_outbox_message<S: StorageAccess>(
 
     storage.get_first_blocking(TableScan::KeyRangeInclusive(start, end), |kv| {
         if let Some((k, v)) = kv {
-            let t = decode_key_value(k, v)?;
+            let t = decode_sequence_number_value(k, v)?;
             Ok(Some(t))
         } else {
             Ok(None)
@@ -148,8 +149,34 @@ impl<'a> OutboxTable for RocksDBTransaction<'a> {
         truncate_outbox(self, partition_id, seq_to_truncate)
     }
 }
+pub type KeyedOutboxMessage = (PartitionId, u64, OutboxMessage);
 
-fn decode_key_value(k: &[u8], v: &[u8]) -> crate::Result<(u64, OutboxMessage)> {
+impl RocksDBStorage {
+    pub fn all_outbox_messages(
+        &self,
+    ) -> impl Iterator<Item = crate::Result<KeyedOutboxMessage>> + '_ {
+        // only use the OutboxKey kind as prefix
+        let outbox_key = OutboxKey::default();
+        let iter = self.iterator_from(TableScan::KeyPrefix(outbox_key));
+        OwnedIterator::new(iter).map(|(key, value)| {
+            decode_key_value(&key, &value).and_then(|(key, value)| match key.into_inner() {
+                (Some(partition_id), Some(index)) => Ok((partition_id, index, value)),
+                _ => Err(StorageError::DataIntegrityError),
+            })
+        })
+    }
+}
+
+fn decode_key_value(k: &[u8], v: &[u8]) -> crate::Result<(OutboxKey, OutboxMessage)> {
+    let key = OutboxKey::deserialize_from(&mut Cursor::new(k))?;
+
+    // decode value
+    let outbox_message = decode_value(v)?;
+
+    Ok((key, outbox_message))
+}
+
+fn decode_sequence_number_value(k: &[u8], v: &[u8]) -> crate::Result<(u64, OutboxMessage)> {
     // decode key
     let key = OutboxKey::deserialize_from(&mut Cursor::new(k))?;
     let sequence_number = *key.message_index_ok_or()?;

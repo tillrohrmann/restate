@@ -8,28 +8,18 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-mod analyzer;
-pub mod context;
-mod deployment;
-mod fsm;
-mod generic_table;
-mod idempotency;
-mod inbox;
-mod invocation_state;
-mod invocation_status;
-mod journal;
-mod keyed_service_status;
-mod outbox;
-mod physical_optimizer;
-mod service;
-mod state;
-mod table_macro;
-mod table_util;
+#![allow(dead_code)]
 
-pub use context::BuildError;
+use crate::table_macro::*;
 
-#[cfg(test)]
-pub(crate) mod mocks;
+use datafusion::arrow::datatypes::DataType;
 
-#[cfg(test)]
-mod tests;
+define_table!(fsm(
+    partition_id: DataType::UInt64,
+
+    inbox_sequence_number: DataType::UInt64,
+
+    outbox_sequence_number: DataType::UInt64,
+
+    last_applied_lsn: DataType::UInt64,
+));

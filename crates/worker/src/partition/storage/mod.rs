@@ -32,6 +32,7 @@ use restate_storage_api::timer_table::{Timer, TimerKey, TimerTable};
 use restate_storage_api::Result as StorageResult;
 use restate_storage_api::StorageError;
 use restate_timer::TimerReader;
+use restate_types::fsm::FsmVariable;
 use restate_types::identifiers::{
     EntryIndex, IdempotencyId, InvocationId, PartitionId, PartitionKey, ServiceId, WithPartitionKey,
 };
@@ -109,7 +110,7 @@ where
         load_seq_number(
             &mut self.storage,
             self.partition_id,
-            fsm_variable::INBOX_SEQ_NUMBER,
+            FsmVariable::InboxSeqNumber.as_repr(),
         )
     }
 
@@ -119,14 +120,14 @@ where
         load_seq_number(
             &mut self.storage,
             self.partition_id,
-            fsm_variable::OUTBOX_SEQ_NUMBER,
+            FsmVariable::OutboxSeqNumber.as_repr(),
         )
     }
 
     pub async fn load_applied_lsn(&mut self) -> StorageResult<Option<Lsn>> {
         let seq_number = self
             .storage
-            .get::<SequenceNumber>(self.partition_id, fsm_variable::APPLIED_LSN)
+            .get::<SequenceNumber>(self.partition_id, FsmVariable::AppliedLsn.as_repr())
             .await?;
 
         Ok(seq_number.map(|seq_number| Lsn::from(u64::from(seq_number))))
@@ -218,7 +219,7 @@ where
         self.inner
             .put(
                 self.partition_id,
-                fsm_variable::APPLIED_LSN,
+                FsmVariable::AppliedLsn.as_repr(),
                 SequenceNumber::from(u64::from(lsn)),
             )
             .await;
@@ -446,12 +447,12 @@ where
     }
 
     async fn store_inbox_seq_number(&mut self, seq_number: MessageIndex) -> StorageResult<()> {
-        self.store_seq_number(seq_number, fsm_variable::INBOX_SEQ_NUMBER)
+        self.store_seq_number(seq_number, FsmVariable::InboxSeqNumber.as_repr())
             .await
     }
 
     async fn store_outbox_seq_number(&mut self, seq_number: MessageIndex) -> StorageResult<()> {
-        self.store_seq_number(seq_number, fsm_variable::OUTBOX_SEQ_NUMBER)
+        self.store_seq_number(seq_number, FsmVariable::OutboxSeqNumber.as_repr())
             .await
     }
 
@@ -615,13 +616,6 @@ where
     ) -> impl Future<Output = ()> + Send {
         self.inner.delete_idempotency_metadata(idempotency_id)
     }
-}
-
-mod fsm_variable {
-    pub(crate) const INBOX_SEQ_NUMBER: u64 = 0;
-    pub(crate) const OUTBOX_SEQ_NUMBER: u64 = 1;
-
-    pub(crate) const APPLIED_LSN: u64 = 2;
 }
 
 impl<Storage> OutboxReader for PartitionStorage<Storage>
