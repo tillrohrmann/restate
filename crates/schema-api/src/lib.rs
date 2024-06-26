@@ -89,6 +89,7 @@ pub mod deployment {
     #[derive(Debug, Clone)]
     #[cfg_attr(feature = "serde", serde_with::serde_as)]
     #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    #[cfg_attr(feature = "serde", serde(from = "ShadowDeploymentTypeHttp"))]
     #[cfg_attr(feature = "serde_schema", derive(schemars::JsonSchema))]
     pub struct DeploymentTypeHttp {
         #[cfg_attr(
@@ -102,12 +103,55 @@ pub mod deployment {
             feature = "serde",
             serde(
                 default,
+                with = "serde_with::As::<restate_serde_util::VersionSerde>"
+            )
+        )]
+        #[cfg_attr(feature = "serde_schema", schemars(with = "String"))]
+        http_version: http::Version,
+    }
+
+    #[cfg_attr(feature = "serde", serde_with::serde_as)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+    pub struct ShadowDeploymentTypeHttp {
+        #[cfg_attr(
+            feature = "serde",
+            serde(with = "serde_with::As::<serde_with::DisplayFromStr>")
+        )]
+        address: Uri,
+        protocol_type: ProtocolType,
+        #[cfg_attr(
+            feature = "serde",
+            serde(
+                default,
                 with = "serde_with::As::<Option<restate_serde_util::VersionSerde>>"
             )
         )]
-        #[cfg_attr(feature = "serde_schema", schemars(with = "Option<String>"))]
         // optional as we did not used to store this and it could be missing in pre-existing deployments
         http_version: Option<http::Version>,
+    }
+
+    impl From<ShadowDeploymentTypeHttp> for DeploymentTypeHttp {
+        fn from(value: ShadowDeploymentTypeHttp) -> Self {
+            let ShadowDeploymentTypeHttp {
+                address,
+                protocol_type,
+                http_version
+            } = value;
+
+            let http_version = match http_version {
+                Some(v) => v,
+                None => match protocol_type {
+                    ProtocolType::BidiStream => http::Version::HTTP_2,
+                    ProtocolType::RequestResponse => http::Version::HTTP_11,
+                }
+            };
+
+            DeploymentTypeHttp {
+                address,
+                protocol_type,
+                http_version,
+            }
+        }
     }
 
     impl DeploymentTypeHttp {
@@ -122,10 +166,7 @@ pub mod deployment {
             (
                 self.address,
                 self.protocol_type,
-                match self.http_version {
-                    Some(v) => v,
-                    None => Self::backfill_http_version(self.protocol_type),
-                },
+                self.http_version,
             )
         }
     }
@@ -165,7 +206,7 @@ pub mod deployment {
                 ty: DeploymentType::Http(DeploymentTypeHttp {
                     address,
                     protocol_type,
-                    http_version: Some(http_version),
+                    http_version,
                 }),
                 delivery_options,
                 created_at: MillisSinceEpoch::now(),
