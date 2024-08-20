@@ -9,6 +9,7 @@ publish = false
 
 [features]
 default = []
+kafka-loglet = []
 
 replicated-loglet = []
 schemars = ["dep:schemars", "restate-serde-util/schema"]
@@ -25,7 +26,7 @@ base62 = { version = "2.0.2" }
 base64 = { workspace = true }
 bytes = { workspace = true }
 bytestring = { workspace = true }
-clap = { workspace = true, features = ["std", "derive", "env"], optional = true }
+clap = { workspace = true, features = ["std", "derive", "env",], optional = true }
 derive_builder = { workspace = true }
 derive_more = { workspace = true }
 dyn-clone = { version = "1.0" }
@@ -56,7 +57,7 @@ sync_wrapper = { workspace = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tiny-gradient = { version = "0.1.0" }
-tokio = { workspace = true, default-features = false, features = ["time", "sync"]}
+tokio = { workspace = true, default-features = false, features = ["time", "sync",] }
 toml = { version = "0.8.12" }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
