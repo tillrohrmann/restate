@@ -33,14 +33,16 @@ use enum_map::Enum;
 use restate_core::ShutdownError;
 use restate_rocksdb::{RocksDb, RocksError};
 use restate_storage_api::{Storage, StorageError, Transaction};
-
+use restate_storage_api::invocation_status_table::InvocationStatus;
 use restate_types::identifiers::{PartitionId, PartitionKey, WithPartitionKey};
 use restate_types::storage::{StorageCodec, StorageDecode, StorageEncode};
-
+use crate::invocation_status_table::InvocationStatusKey;
 use crate::keys::KeyKind;
 use crate::keys::TableKey;
+use crate::owned_iter::OwnedIterator;
 use crate::scan::PhysicalScan;
 use crate::scan::TableScan;
+use crate::scan::TableScan::FullScanPartitionKeyRange;
 use crate::snapshots::LocalPartitionSnapshot;
 
 pub type DB = rocksdb::DB;
@@ -542,12 +544,49 @@ pub struct PartitionStoreTransaction<'a> {
 }
 
 impl<'a> PartitionStoreTransaction<'a> {
+    pub fn iterator<K: TableKey>(
+        &self,
+        scan: TableScan<K>,
+    ) -> DBRawIteratorWithThreadMode<'a, DB> {
+        let scan: PhysicalScan = scan.into();
+        match scan {
+            PhysicalScan::Prefix(table, key_kind, prefix) => {
+                self.prefix_iterator(table, key_kind, prefix.freeze())
+            }
+            PhysicalScan::RangeExclusive(table, key_kind, scan_mode, start, end) => {
+                self.range_iterator(table, key_kind, scan_mode, start.freeze(), end.freeze())
+            }
+            PhysicalScan::RangeOpen(table, key_kind, start) => {
+                // We delayed the generate the synthetic iterator upper bound until this point
+                // because we might have different prefix length requirements based on the
+                // table+key_kind combination and we should keep this knowledge as low-level as
+                // possible.
+                //
+                // make the end has the same length as all prefixes to ensure rocksdb key
+                // comparator can leverage bloom filters when applicable
+                // (if auto_prefix_mode is enabled)
+                let mut end = BytesMut::zeroed(DB_PREFIX_LENGTH);
+                // We want to ensure that Range scans fall within the same key kind.
+                // So, we limit the iterator to the upper bound of this prefix
+                let kind_upper_bound = K::KEY_KIND.exclusive_upper_bound();
+                end[..kind_upper_bound.len()].copy_from_slice(&kind_upper_bound);
+                self.range_iterator(
+                    table,
+                    key_kind,
+                    ScanMode::TotalOrder,
+                    start.freeze(),
+                    end.freeze(),
+                )
+            }
+        }
+    }
+
     pub(crate) fn prefix_iterator(
         &self,
         table: TableKind,
         _key_kind: KeyKind,
         prefix: Bytes,
-    ) -> DBIterator {
+    ) -> DBIterator<'a> {
         let table = self.table_handle(table);
         let mut opts = rocksdb::ReadOptions::default();
         opts.set_iterate_range(PrefixRange(prefix.clone()));
@@ -567,7 +606,7 @@ impl<'a> PartitionStoreTransaction<'a> {
         scan_mode: ScanMode,
         from: Bytes,
         to: Bytes,
-    ) -> DBIterator {
+    ) -> DBIterator<'a> {
         let table = self.table_handle(table);
         let mut opts = rocksdb::ReadOptions::default();
         // todo: use auto_prefix_mode, at the moment, rocksdb doesn't expose this through the C
@@ -652,7 +691,7 @@ impl<'a> StorageAccess for PartitionStoreTransaction<'a> {
     fn iterator_from<K: TableKey>(
         &self,
         scan: TableScan<K>,
-    ) -> DBRawIteratorWithThreadMode<'_, Self::DBAccess<'_>> {
+    ) -> DBRawIteratorWithThreadMode<'a, Self::DBAccess<'_>> {
         let scan: PhysicalScan = scan.into();
         match scan {
             PhysicalScan::Prefix(table, key_kind, prefix) => {

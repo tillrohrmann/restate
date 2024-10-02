@@ -18,6 +18,7 @@ use tokio_stream::StreamExt;
 
 use restate_core::TaskCenterBuilder;
 use restate_partition_store::{OpenMode, PartitionStore, PartitionStoreManager};
+use restate_partition_store::scan::TableScan::FullScanPartitionKeyRange;
 use restate_rocksdb::RocksDbManager;
 use restate_storage_api::StorageError;
 use restate_types::config::{CommonOptions, WorkerOptions};

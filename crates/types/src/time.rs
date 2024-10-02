@@ -176,6 +176,63 @@ mod tests {
 
     use std::time::SystemTime;
 
+    #[cfg(test)]
+    mod tests {
+        use test_log::test;
+
+        #[derive(Debug)]
+        struct Value {
+            value: String,
+        }
+
+        impl Value {
+            fn string_value<'a>(&'a self) -> &'a String {
+                &self.value
+            }
+        }
+
+        struct Container<'a> {
+            value: &'a Value,
+        }
+
+        impl<'a> Container<'a> {
+            fn value(&self) -> &Value {
+                self.value
+            }
+
+            fn value_a(&self) -> &'a Value {
+                self.value
+            }
+
+            fn string_value(&self) -> &String {
+                self.value.string_value()
+            }
+
+            fn string_value_a(&self) -> &'a String {
+                self.value.string_value()
+            }
+
+            fn update(&mut self) {
+
+            }
+        }
+
+        #[test]
+        fn foobar() {
+            let value = Value { value: "hello".to_owned() };
+            let mut container = Container { value: &value };
+
+            println!("Foobar");
+            println!("{:?}", container.value_a());
+            println!("{:?}", container.string_value_a());
+
+            let string_value = container.string_value_a();
+            container.update();
+
+            println!("{:?}", string_value);
+        }
+    }
+
     #[test]
     fn millis_should_not_overflow() {
         let t: SystemTime = MillisSinceEpoch::new(u64::MAX).into();

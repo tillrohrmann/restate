@@ -328,6 +328,33 @@ impl<'a> ReadOnlyInvocationStatusTable for PartitionStoreTransaction<'a> {
     }
 }
 
+pub async fn run_neo_invocation_status_migration(
+    storage: &mut PartitionStoreTransaction<'_>,
+) -> crate::partition_store::Result<()> {
+    let iterator = storage.iterator(FullScanPartitionKeyRange::<
+        InvocationStatusKey,
+    >(
+        PartitionKey::MIN..=PartitionKey::MAX,
+    ));
+    let mut iterator = OwnedIterator::new(iterator);
+
+    while let Some((mut old_key, mut old_value)) = iterator.next() {
+        let k = InvocationStatusKey::deserialize_from(&mut old_key)?;
+        let v = StorageCodec::decode::<InvocationStatus, _>(&mut old_value)
+            .map_err(|err| StorageError::Generic(err.into()))?;
+
+        // This uses invocation status v2 under the hood.
+        put_invocation_status(
+            storage,
+            &InvocationId::from_parts(*k.partition_key_ok_or()?, *k.invocation_uuid_ok_or()?),
+            &v,
+        );
+        storage.delete_key(&k);
+    }
+
+    Ok(())
+}
+
 impl<'a> InvocationStatusTable for PartitionStoreTransaction<'a> {
     async fn put_invocation_status(
         &mut self,

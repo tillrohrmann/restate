@@ -239,6 +239,7 @@ pub struct ReplicatedLogletOptions {
     pub log_server_retry_policy: RetryPolicy,
 }
 
+#[cfg(feature = "replicated-loglet")]
 impl Default for ReplicatedLogletOptions {
     fn default() -> Self {
         Self {
