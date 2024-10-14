@@ -8,11 +8,12 @@ license.workspace = true
 publish = false
 
 [features]
-default = []
+default = ["replicated-loglet"]
 clients = []
 servers = []
 options_schema = ["restate-service-client/options_schema"]
 memory-loglet = ["restate-bifrost/memory-loglet"]
+replicated-loglet = ["restate-bifrost/replicated-loglet"]
 
 [dependencies]
 restate-admin-rest-model = { workspace = true, features = ["schema"] }
