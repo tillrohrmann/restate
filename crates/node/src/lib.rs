@@ -232,6 +232,7 @@ impl Node {
                     bifrost_svc.handle(),
                     metadata_store_client.clone(),
                     updating_schema_information,
+                    partition_routing_refresher.partition_routing(),
                 )
                 .await?,
             )

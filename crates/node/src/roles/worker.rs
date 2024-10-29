@@ -15,6 +15,7 @@ use restate_bifrost::Bifrost;
 use restate_core::network::MessageRouterBuilder;
 use restate_core::network::Networking;
 use restate_core::network::TransportConnect;
+use restate_core::routing_info::PartitionRouting;
 use restate_core::worker_api::ProcessorsManagerHandle;
 use restate_core::{cancellation_watcher, task_center, Metadata, MetadataKind};
 use restate_core::{ShutdownError, TaskKind};
@@ -79,6 +80,7 @@ impl<T: TransportConnect> WorkerRole<T> {
         bifrost: Bifrost,
         metadata_store_client: MetadataStoreClient,
         updating_schema_information: Live<Schema>,
+        partition_routing: PartitionRouting,
     ) -> Result<Self, WorkerRoleBuildError> {
         let worker = Worker::create(
             updateable_config,
@@ -89,6 +91,7 @@ impl<T: TransportConnect> WorkerRole<T> {
             router_builder,
             updating_schema_information,
             metadata_store_client,
+            partition_routing,
         )
         .await?;
 

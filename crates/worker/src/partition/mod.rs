@@ -38,7 +38,7 @@ use restate_storage_api::outbox_table::ReadOnlyOutboxTable;
 use restate_storage_api::service_status_table::{
     ReadOnlyVirtualObjectStatusTable, VirtualObjectStatus,
 };
-use restate_storage_api::{invocation_status_table, StorageError, Transaction};
+use restate_storage_api::{StorageError, Transaction};
 use restate_types::cluster::cluster_state::{PartitionProcessorStatus, ReplayStatus, RunMode};
 use restate_types::config::{Configuration, WorkerOptions};
 use restate_types::identifiers::{

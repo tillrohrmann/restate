@@ -30,6 +30,7 @@ use restate_core::network::rpc_router::RpcRouter;
 use restate_core::network::MessageRouterBuilder;
 use restate_core::network::Networking;
 use restate_core::network::TransportConnect;
+use restate_core::routing_info::PartitionRouting;
 use restate_core::worker_api::ProcessorsManagerHandle;
 use restate_core::{cancellation_watcher, task_center, Metadata, TaskKind};
 use restate_ingress_dispatcher::IngressDispatcher;
@@ -119,6 +120,7 @@ impl<T: TransportConnect> Worker<T> {
         router_builder: &mut MessageRouterBuilder,
         schema: Live<Schema>,
         metadata_store_client: MetadataStoreClient,
+        partition_routing: PartitionRouting,
     ) -> Result<Self, BuildError> {
         metric_definitions::describe_metrics();
         health_status.update(WorkerStatus::StartingUp);
@@ -151,6 +153,7 @@ impl<T: TransportConnect> Worker<T> {
                 networking.clone(),
                 rpc_router,
                 partition_table,
+                partition_routing,
             )),
             schema.clone(),
         );
