@@ -57,6 +57,7 @@ use restate_types::net::partition_processor::{
     AppendInvocationReplyOn, GetInvocationOutputResponseMode, IngressResponseResult,
     InvocationOutput, PartitionProcessorRpcError, PartitionProcessorRpcRequest,
     PartitionProcessorRpcRequestInner, PartitionProcessorRpcResponse,
+    StreamingPartitionProcessorRequestKind, StreamingPartitionProcessorRpcRequest,
 };
 use restate_types::retries::RetryPolicy;
 use restate_types::time::MillisSinceEpoch;
@@ -69,7 +70,7 @@ use crate::metric_definitions::{
     PP_APPLY_COMMAND_BATCH_SIZE, PP_APPLY_COMMAND_DURATION,
 };
 use crate::partition::invoker_storage_reader::InvokerStorageReader;
-use crate::partition::leadership::{LeadershipState, PartitionProcessorMetadata};
+use crate::partition::leadership::{LeadershipState, PartitionProcessorMetadata, Rpc};
 use crate::partition::snapshot_producer::{SnapshotProducer, SnapshotSource};
 use crate::partition::state_machine::{ActionCollector, StateMachine};
 
@@ -104,6 +105,7 @@ pub(super) struct PartitionProcessorBuilder<InvokerInputSender> {
     invoker_tx: InvokerInputSender,
     control_rx: mpsc::Receiver<PartitionProcessorControlCommand>,
     rpc_rx: mpsc::Receiver<Incoming<PartitionProcessorRpcRequest>>,
+    streaming_rpc_rx: mpsc::Receiver<Incoming<StreamingPartitionProcessorRpcRequest>>,
     status_watch_tx: watch::Sender<PartitionProcessorStatus>,
 }
 
@@ -121,6 +123,7 @@ where
         options: &WorkerOptions,
         control_rx: mpsc::Receiver<PartitionProcessorControlCommand>,
         rpc_rx: mpsc::Receiver<Incoming<PartitionProcessorRpcRequest>>,
+        streaming_rpc_rx: mpsc::Receiver<Incoming<StreamingPartitionProcessorRpcRequest>>,
         status_watch_tx: watch::Sender<PartitionProcessorStatus>,
         invoker_tx: InvokerInputSender,
     ) -> Self {
@@ -137,6 +140,7 @@ where
             invoker_tx,
             control_rx,
             rpc_rx,
+            streaming_rpc_rx,
             status_watch_tx,
         }
     }
@@ -159,6 +163,7 @@ where
             invoker_tx,
             control_rx,
             rpc_rx,
+            streaming_rpc_rx,
             status_watch_tx,
             status,
             ..
@@ -208,6 +213,7 @@ where
             configuration,
             control_rx,
             rpc_rx,
+            streaming_rpc_rx,
             status_watch_tx,
             status,
             inflight_create_snapshot_task: None,
@@ -247,6 +253,7 @@ pub struct PartitionProcessor<Codec, InvokerSender> {
     configuration: Live<Configuration>,
     control_rx: mpsc::Receiver<PartitionProcessorControlCommand>,
     rpc_rx: mpsc::Receiver<Incoming<PartitionProcessorRpcRequest>>,
+    streaming_rpc_rx: mpsc::Receiver<Incoming<StreamingPartitionProcessorRpcRequest>>,
     status_watch_tx: watch::Sender<PartitionProcessorStatus>,
     status: PartitionProcessorStatus,
     task_center: TaskCenter,
@@ -385,6 +392,9 @@ where
                 }
                 Some(rpc) = self.rpc_rx.recv() => {
                     self.on_rpc(rpc, &mut partition_store).await;
+                }
+                Some(streaming_rpc) = self.streaming_rpc_rx.recv() => {
+                    self.on_streaming_rpc(streaming_rpc).await;
                 }
                 _ = status_update_timer.tick() => {
                     self.status_watch_tx.send_modify(|old| {
@@ -576,7 +586,7 @@ where
                 self.leadership_state
                     .handle_rpc_proposal_command(
                         request_id,
-                        response_tx,
+                        Rpc::Normal(response_tx),
                         service_invocation.partition_key(),
                         Command::Invoke(service_invocation),
                     )
@@ -592,7 +602,7 @@ where
                 self.leadership_state
                     .handle_rpc_proposal_command(
                         request_id,
-                        response_tx,
+                        Rpc::Normal(response_tx),
                         service_invocation.partition_key(),
                         Command::Invoke(service_invocation),
                     )
@@ -618,7 +628,7 @@ where
                 self.leadership_state
                     .handle_rpc_proposal_command(
                         request_id,
-                        response_tx,
+                        Rpc::Normal(response_tx),
                         invocation_query.partition_key(),
                         Command::AttachInvocation(AttachInvocationRequest {
                             invocation_query,
@@ -651,6 +661,47 @@ where
                         response_tx,
                     )
                     .await;
+            }
+        };
+    }
+
+    async fn on_streaming_rpc(&mut self, rpc: Incoming<StreamingPartitionProcessorRpcRequest>) {
+        let (
+            response_tx,
+            StreamingPartitionProcessorRpcRequest {
+                request_id,
+                request,
+                ..
+            },
+        ) = rpc.split();
+        match request {
+            StreamingPartitionProcessorRequestKind::Invoke(mut service_invocation) => {
+                service_invocation.submit_notification_sink =
+                    Some(SubmitNotificationSink::Ingress { request_id });
+                service_invocation.response_sink =
+                    Some(ServiceInvocationResponseSink::Ingress { request_id });
+
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        Rpc::Streaming(response_tx),
+                        service_invocation.partition_key(),
+                        Command::Invoke(service_invocation),
+                    )
+                    .await
+            }
+            StreamingPartitionProcessorRequestKind::Attach(invocation_query) => {
+                self.leadership_state
+                    .handle_rpc_proposal_command(
+                        request_id,
+                        Rpc::Streaming(response_tx),
+                        invocation_query.partition_key(),
+                        Command::AttachInvocation(AttachInvocationRequest {
+                            invocation_query,
+                            response_sink: ServiceInvocationResponseSink::Ingress { request_id },
+                        }),
+                    )
+                    .await
             }
         };
     }

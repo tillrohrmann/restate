@@ -9,18 +9,20 @@
 // by the Apache License, Version 2.0.
 
 use assert2::let_assert;
-use restate_types::identifiers::{PartitionId, PartitionProcessorRpcRequestId, WithPartitionKey};
+use restate_types::identifiers::{InvocationId, PartitionId, PartitionProcessorRpcRequestId, WithPartitionKey};
 use restate_types::invocation::{InvocationQuery, InvocationResponse, ServiceInvocation};
 use restate_types::live::Live;
 use restate_types::net::partition_processor::{
     AppendInvocationReplyOn, GetInvocationOutputResponseMode, InvocationOutput,
-    PartitionProcessorRpcRequest, PartitionProcessorRpcRequestInner, PartitionProcessorRpcResponse,
+    PartitionProcessorRpcError, PartitionProcessorRpcRequest, PartitionProcessorRpcRequestInner,
+    PartitionProcessorRpcResponse, StreamingPartitionProcessorRequestKind,
+    StreamingPartitionProcessorRpcRequest, StreamingPartitionProcessorRpcResponse,
     SubmittedInvocationNotification,
 };
 use restate_types::partition_table::{FindPartition, PartitionTable, PartitionTableError};
 
-use crate::network::rpc_router::{RpcError, RpcRouter};
-use crate::network::NetworkSender;
+use crate::network::rpc_router::{ConnectionStream, RpcError, RpcRouter, StreamingRpcRouter};
+use crate::network::{Networking, TransportConnect};
 use crate::routing_info::PartitionRouting;
 use crate::ShutdownError;
 
@@ -62,34 +64,125 @@ pub enum GetInvocationOutputResponse {
     Ready(InvocationOutput),
 }
 
-#[derive(Clone)]
-pub struct PartitionProcessorRpcClient<N> {
-    network_sender: N,
+pub struct PartitionProcessorRpcClient<T> {
+    networking: Networking<T>,
     rpc_router: RpcRouter<PartitionProcessorRpcRequest>,
+    streaming_rpc_router: StreamingRpcRouter<StreamingPartitionProcessorRpcRequest>,
     partition_table: Live<PartitionTable>,
     partition_routing: PartitionRouting,
 }
 
-impl<N> PartitionProcessorRpcClient<N> {
+impl<T> Clone for PartitionProcessorRpcClient<T> {
+    fn clone(&self) -> Self {
+        Self {
+            networking: self.networking.clone(),
+            rpc_router: self.rpc_router.clone(),
+            streaming_rpc_router: self.streaming_rpc_router.clone(),
+            partition_table: self.partition_table.clone(),
+            partition_routing: self.partition_routing.clone(),
+        }
+    }
+}
+
+impl<T> PartitionProcessorRpcClient<T> {
     pub fn new(
-        network_sender: N,
+        networking: Networking<T>,
         rpc_router: RpcRouter<PartitionProcessorRpcRequest>,
+        streaming_rpc_router: StreamingRpcRouter<StreamingPartitionProcessorRpcRequest>,
         partition_table: Live<PartitionTable>,
         partition_routing: PartitionRouting,
     ) -> Self {
         Self {
-            network_sender,
+            networking,
             rpc_router,
+            streaming_rpc_router,
             partition_table,
             partition_routing,
         }
     }
 }
 
-impl<N> PartitionProcessorRpcClient<N>
+impl<T> PartitionProcessorRpcClient<T>
 where
-    N: NetworkSender + 'static,
+    T: TransportConnect,
 {
+
+    pub async fn request_refresh(&self) {
+        self.partition_routing.request_refresh().await;
+    }
+
+    pub async fn submit_invocation(
+        &self,
+        request_id: PartitionProcessorRpcRequestId,
+        service_invocation: ServiceInvocation,
+    ) -> Result<
+        ConnectionStream<Result<StreamingPartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
+        PartitionProcessorRpcClientError,
+    > {
+        let partition_id = self
+            .partition_table
+            .pinned()
+            .find_partition_id(service_invocation.invocation_id.partition_key())?;
+
+        let node_id = self
+            .partition_routing
+            .get_node_by_partition(partition_id)
+            .ok_or(PartitionProcessorRpcClientError::UnknownNodePerPartition(
+                partition_id,
+            ))?;
+
+        let response_stream = self
+            .streaming_rpc_router
+            .call(
+                &self.networking,
+                node_id,
+                StreamingPartitionProcessorRpcRequest {
+                    request_id,
+                    partition_id,
+                    request: StreamingPartitionProcessorRequestKind::Invoke(service_invocation),
+                },
+            )
+            .await?;
+
+        Ok(response_stream)
+    }
+
+    pub async fn attach_to_invocation(
+        &self,
+        request_id: PartitionProcessorRpcRequestId,
+        invocation_id: InvocationId,
+    ) -> Result<
+        ConnectionStream<Result<StreamingPartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
+        PartitionProcessorRpcClientError,
+    > {
+        let partition_id = self
+            .partition_table
+            .pinned()
+            .find_partition_id(invocation_id.partition_key())?;
+
+        let node_id = self
+            .partition_routing
+            .get_node_by_partition(partition_id)
+            .ok_or(PartitionProcessorRpcClientError::UnknownNodePerPartition(
+                partition_id,
+            ))?;
+
+        let response_stream = self
+            .streaming_rpc_router
+            .call(
+                &self.networking,
+                node_id,
+                StreamingPartitionProcessorRpcRequest {
+                    request_id,
+                    partition_id,
+                    request: StreamingPartitionProcessorRequestKind::Attach(InvocationQuery::Invocation(invocation_id)),
+                },
+            )
+            .await?;
+
+        Ok(response_stream)
+    }
+
     pub async fn append_invocation(
         &self,
         request_id: PartitionProcessorRpcRequestId,
@@ -264,7 +357,7 @@ where
         let response = self
             .rpc_router
             .call(
-                &self.network_sender,
+                &self.networking,
                 node_id,
                 PartitionProcessorRpcRequest {
                     request_id,

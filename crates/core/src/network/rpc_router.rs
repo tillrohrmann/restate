@@ -8,24 +8,29 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Weak};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use futures::future::BoxFuture;
 use futures::stream::BoxStream;
-use futures::StreamExt;
+use futures::{FutureExt, Stream, StreamExt};
 use restate_types::NodeId;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::Instant;
-use tracing::{error, warn};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tracing::{debug, error, warn};
 
 use restate_types::net::codec::{Targeted, WireDecode, WireEncode};
 use restate_types::net::RpcRequest;
 
 use super::{
     HasConnection, Incoming, MessageHandler, MessageRouterBuilder, NetworkError, NetworkSendError,
-    NetworkSender, Networking, Outgoing, TransportConnect,
+    NetworkSender, Networking, Outgoing, TransportConnect, WeakConnection,
 };
 use crate::{cancellation_watcher, ShutdownError};
 
@@ -162,6 +167,192 @@ where
     pub fn num_in_flight(&self) -> usize {
         self.response_tracker.num_in_flight()
     }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("channel closed")]
+pub struct ChannelClosedError;
+
+#[derive(Clone)]
+pub struct StreamingRpcRouter<T>
+where
+    T: RpcRequest,
+{
+    response_tracker: StreamingResponseTrackerV2<T::ResponseMessage>,
+}
+
+impl<T> StreamingRpcRouter<T>
+where
+    T: RpcRequest + WireEncode + Send + Sync + 'static,
+    T::ResponseMessage: WireDecode + Send + Sync + 'static,
+{
+    pub fn new(router_builder: &mut MessageRouterBuilder) -> Self {
+        let response_tracker = StreamingResponseTrackerV2::<T::ResponseMessage>::default();
+        router_builder.add_message_handler(response_tracker.clone());
+        Self { response_tracker }
+    }
+
+    pub async fn call<X: TransportConnect>(
+        &self,
+        networking: &Networking<X>,
+        peer: impl Into<NodeId>,
+        msg: T,
+    ) -> Result<
+        ConnectionStream<T::ResponseMessage>,
+        RpcError<T>,
+    > {
+        let node_id = peer.into();
+        let outgoing = match networking.node_connection(node_id).await {
+            Ok(connection) => {
+                let outgoing = Outgoing::new(node_id, msg);
+                outgoing.assign_connection(connection)
+            }
+            Err(err) => return Err(RpcError::SendError(NetworkSendError::new(msg, err))),
+        };
+
+        let response_stream = self
+            .response_tracker
+            .register(&outgoing)
+            .expect("msg-id is registered once");
+
+        outgoing.send().await.map_err(|e| {
+            RpcError::SendError(NetworkSendError::new(
+                Outgoing::into_body(e.original),
+                e.source,
+            ))
+        })?;
+
+        Ok(response_stream)
+    }
+}
+
+struct StreamingResponseTrackerV2<T>
+where
+    T: Targeted,
+{
+    in_flight: Arc<DashMap<u64, StreamingRpcSender<T>>>,
+}
+
+impl<T> Clone for StreamingResponseTrackerV2<T>
+where
+    T: Targeted,
+{
+    fn clone(&self) -> Self {
+        Self {
+            in_flight: Arc::clone(&self.in_flight),
+        }
+    }
+}
+
+impl<T> Default for StreamingResponseTrackerV2<T>
+where
+    T: Targeted,
+{
+    fn default() -> Self {
+        Self {
+            in_flight: Arc::new(DashMap::default()),
+        }
+    }
+}
+
+impl<T> StreamingResponseTrackerV2<T>
+where
+    T: Targeted,
+{
+    fn register<M>(
+        &self,
+        outgoing: &Outgoing<M, HasConnection>,
+    ) -> Option<ConnectionStream<T>> {
+        let msg_id = outgoing.msg_id();
+        match self.in_flight.entry(msg_id) {
+            Entry::Occupied(_) => {
+                error!(
+                    "msg_id {:?} was already in-flight when this rpc was issued, this is an indicator that the msg_id is not unique across RPC calls",
+                    msg_id
+                );
+                None
+            }
+            Entry::Vacant(entry) => {
+                let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+                entry.insert(StreamingRpcSender { sender });
+                // todo implement stream that also monitors connection state
+                Some(ConnectionStream::new(receiver, outgoing.connection()))
+            }
+        }
+    }
+}
+
+enum State {
+    Open,
+    StreamFinished,
+    ConnectionClosed,
+}
+
+pub struct ConnectionStream<T> {
+    state: State,
+    stream: UnboundedReceiverStream<Incoming<T>>,
+    connection_closed: BoxFuture<'static, ()>,
+}
+
+impl<T> ConnectionStream<T> {
+    fn new(receiver: mpsc::UnboundedReceiver<Incoming<T>>, connection: &WeakConnection) -> Self {
+        Self {
+            state: State::Open,
+            stream: UnboundedReceiverStream::new(receiver),
+            connection_closed: connection.closed().boxed(),
+        }
+    }
+}
+
+impl<T> Stream for ConnectionStream<T> {
+    type Item = Result<Incoming<T>, ChannelClosedError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.state {
+            State::Open => {
+                if let Poll::Ready(_) = self.connection_closed.poll_unpin(cx) {
+                    self.state = State::ConnectionClosed;
+                    return Poll::Ready(Some(Err(ChannelClosedError)));
+                }
+
+                if let Poll::Ready(item) = self.stream.poll_next_unpin(cx) {
+                    if item.is_none() {
+                        self.state = State::StreamFinished;
+                    }
+
+                    return Poll::Ready(item.map(Ok));
+                }
+
+                Poll::Pending
+            }
+            State::StreamFinished => Poll::Ready(None),
+            State::ConnectionClosed => Poll::Ready(Some(Err(ChannelClosedError))),
+        }
+    }
+}
+
+impl<T> MessageHandler for StreamingResponseTrackerV2<T>
+where
+    T: Targeted + WireDecode,
+{
+    type MessageType = T;
+
+    fn on_message(&self, msg: Incoming<Self::MessageType>) -> impl Future<Output = ()> + Send {
+        if let Some(response_to) = msg.in_response_to() {
+            if let Some(sender) = self.in_flight.get(&response_to) {
+                // if we are failing here then the receiver is no longer interested
+                let _ = sender.sender.send(msg);
+            } else {
+                debug!("Received a message that doesn't correspond to an in-flight request. Ignoring this message.");
+            }
+        }
+
+        futures::future::ready(())
+    }
+}
+
+struct StreamingRpcSender<T> {
+    sender: tokio::sync::mpsc::UnboundedSender<Incoming<T>>,
 }
 
 /// A tracker for responses but can be used to track responses for requests that were dispatched

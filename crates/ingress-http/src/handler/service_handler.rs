@@ -238,7 +238,7 @@ where
         dispatcher: Dispatcher,
     ) -> Result<Response<Full<Bytes>>, HandlerError> {
         let response = dispatcher
-            .append_invocation_and_wait_output(service_invocation)
+            .submit_invocation(service_invocation)
             .instrument(trace_span!("Waiting for response"))
             .await?;
 

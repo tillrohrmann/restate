@@ -20,6 +20,32 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 define_rpc! {
+    @request = StreamingPartitionProcessorRpcRequest,
+    @response = Result<StreamingPartitionProcessorRpcResponse, PartitionProcessorRpcError>,
+    @request_target = TargetName::StreamingPartitionProcessorRpc,
+    @response_target = TargetName::StreamingPartitionProcessorRpcResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamingPartitionProcessorRpcRequest {
+    pub request_id: PartitionProcessorRpcRequestId,
+    pub partition_id: PartitionId,
+    pub request: StreamingPartitionProcessorRequestKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StreamingPartitionProcessorRequestKind {
+    Invoke(ServiceInvocation),
+    Attach(InvocationQuery),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StreamingPartitionProcessorRpcResponse {
+    Submitted(SubmittedInvocationNotification),
+    Output(InvocationOutput),
+}
+
+define_rpc! {
     @request = PartitionProcessorRpcRequest,
     @response = Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>,
     @request_target = TargetName::PartitionProcessorRpc,

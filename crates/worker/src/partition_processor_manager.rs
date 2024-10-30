@@ -55,7 +55,8 @@ use restate_types::net::cluster_controller::AttachRequest;
 use restate_types::net::cluster_controller::{Action, AttachResponse};
 use restate_types::net::metadata::MetadataKind;
 use restate_types::net::partition_processor::{
-    PartitionProcessorRpcError, PartitionProcessorRpcRequest,
+    PartitionProcessorRpcError, PartitionProcessorRpcRequest, PartitionProcessorRpcResponse,
+    StreamingPartitionProcessorRpcRequest, StreamingPartitionProcessorRpcResponse,
 };
 use restate_types::net::partition_processor_manager::CreateSnapshotRequest;
 use restate_types::net::partition_processor_manager::{
@@ -95,6 +96,14 @@ pub struct PartitionProcessorManager<T> {
         Pin<Box<dyn Stream<Item = Incoming<ControlProcessors>> + Send + Sync + 'static>>,
     incoming_partition_processor_rpc:
         Pin<Box<dyn Stream<Item = Incoming<PartitionProcessorRpcRequest>> + Send + Sync + 'static>>,
+    incoming_streaming_partition_processor_rpc: Pin<
+        Box<
+            dyn Stream<Item = Incoming<StreamingPartitionProcessorRpcRequest>>
+                + Send
+                + Sync
+                + 'static,
+        >,
+    >,
     networking: Networking<T>,
     bifrost: Bifrost,
     rx: mpsc::Receiver<ProcessorsManagerCommand>,
@@ -134,6 +143,7 @@ struct ProcessorState {
     running_for_leadership_with_epoch: Option<LeaderEpoch>,
     handle: PartitionProcessorHandle,
     rpc_tx: mpsc::Sender<Incoming<PartitionProcessorRpcRequest>>,
+    streaming_rpc_tx: mpsc::Sender<Incoming<StreamingPartitionProcessorRpcRequest>>,
     watch_rx: watch::Receiver<PartitionProcessorStatus>,
 }
 
@@ -144,6 +154,7 @@ impl ProcessorState {
         key_range: RangeInclusive<PartitionKey>,
         handle: PartitionProcessorHandle,
         rpc_tx: mpsc::Sender<Incoming<PartitionProcessorRpcRequest>>,
+        streaming_rpc_tx: mpsc::Sender<Incoming<StreamingPartitionProcessorRpcRequest>>,
         watch_rx: watch::Receiver<PartitionProcessorStatus>,
     ) -> Self {
         Self {
@@ -155,6 +166,7 @@ impl ProcessorState {
             running_for_leadership_with_epoch: None,
             handle,
             rpc_tx,
+            streaming_rpc_tx,
             watch_rx,
         }
     }
@@ -396,6 +408,7 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
         let attach_router = RpcRouter::new(router_builder);
         let incoming_update_processors = router_builder.subscribe_to_stream(2);
         let incoming_partition_processor_rpc = router_builder.subscribe_to_stream(128);
+        let incoming_streaming_partition_processor_rpc = router_builder.subscribe_to_stream(128);
 
         let (tx, rx) = mpsc::channel(updateable_config.pinned().worker.internal_queue_length());
         Self {
@@ -409,6 +422,7 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
             partition_store_manager,
             incoming_update_processors,
             incoming_partition_processor_rpc,
+            incoming_streaming_partition_processor_rpc,
             networking,
             bifrost,
             attach_router,
@@ -519,6 +533,9 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                 Some(partition_processor_rpc) = self.incoming_partition_processor_rpc.next() => {
                     self.on_partition_processor_rpc(partition_processor_rpc);
                 }
+                Some(streaming_partition_processor_rpc) = self.incoming_streaming_partition_processor_rpc.next() => {
+                    self.on_streaming_partition_processor_rpc(streaming_partition_processor_rpc);
+                }
                 _ = &mut shutdown => {
                     self.health_status.update(WorkerStatus::Unknown);
                     return Ok(());
@@ -541,10 +558,12 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                             "partition-processor-rpc",
                             None,
                             async move {
-                                req.into_outgoing(Err(PartitionProcessorRpcError::Busy))
-                                    .send()
-                                    .await
-                                    .map_err(Into::into)
+                                req.into_outgoing(Err::<PartitionProcessorRpcResponse, _>(
+                                    PartitionProcessorRpcError::Busy,
+                                ))
+                                .send()
+                                .await
+                                .map_err(Into::into)
                             },
                         );
                     }
@@ -554,9 +573,9 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                             "partition-processor-rpc",
                             None,
                             async move {
-                                req.into_outgoing(Err(PartitionProcessorRpcError::NotLeader(
-                                    partition_id,
-                                )))
+                                req.into_outgoing(Err::<PartitionProcessorRpcResponse, _>(
+                                    PartitionProcessorRpcError::NotLeader(partition_id),
+                                ))
                                 .send()
                                 .await
                                 .map_err(Into::into)
@@ -573,7 +592,71 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                 None,
                 async move {
                     partition_processor_rpc
-                        .to_rpc_response(Err(PartitionProcessorRpcError::NotLeader(partition_id)))
+                        .to_rpc_response(Err::<PartitionProcessorRpcResponse, _>(
+                            PartitionProcessorRpcError::NotLeader(partition_id),
+                        ))
+                        .send()
+                        .await
+                        .map_err(Into::into)
+                },
+            );
+        }
+    }
+
+    fn on_streaming_partition_processor_rpc(
+        &self,
+        partition_processor_rpc: Incoming<StreamingPartitionProcessorRpcRequest>,
+    ) {
+        let partition_id = partition_processor_rpc.body().partition_id;
+        if let Some(partition_processor) = self.running_partition_processors.get(&partition_id) {
+            if let Err(err) = partition_processor
+                .streaming_rpc_tx
+                .try_send(partition_processor_rpc)
+            {
+                match err {
+                    TrySendError::Full(req) => {
+                        let _ = self.task_center.spawn(
+                            TaskKind::Disposable,
+                            "partition-processor-rpc",
+                            None,
+                            async move {
+                                req.into_outgoing(Err::<StreamingPartitionProcessorRpcResponse, _>(
+                                    PartitionProcessorRpcError::Busy,
+                                ))
+                                .send()
+                                .await
+                                .map_err(Into::into)
+                            },
+                        );
+                    }
+                    TrySendError::Closed(req) => {
+                        let _ = self.task_center.spawn(
+                            TaskKind::Disposable,
+                            "partition-processor-rpc",
+                            None,
+                            async move {
+                                req.into_outgoing(Err::<StreamingPartitionProcessorRpcResponse, _>(
+                                    PartitionProcessorRpcError::NotLeader(partition_id),
+                                ))
+                                .send()
+                                .await
+                                .map_err(Into::into)
+                            },
+                        );
+                    }
+                }
+            }
+        } else {
+            // ignore shutdown errors
+            let _ = self.task_center.spawn(
+                TaskKind::Disposable,
+                "partition-processor-rpc-response",
+                None,
+                async move {
+                    partition_processor_rpc
+                        .to_rpc_response(Err::<StreamingPartitionProcessorRpcResponse, _>(
+                            PartitionProcessorRpcError::NotLeader(partition_id),
+                        ))
                         .send()
                         .await
                         .map_err(Into::into)
@@ -808,6 +891,7 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
     ) -> Result<ProcessorState, Error> {
         let (control_tx, control_rx) = mpsc::channel(2);
         let (rpc_tx, rpc_rx) = mpsc::channel(128);
+        let (streaming_rpc_tx, streaming_rpc_rx) = mpsc::channel(128);
         let status = PartitionProcessorStatus::new();
         let (watch_tx, watch_rx) = watch::channel(status.clone());
 
@@ -841,6 +925,7 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
             options,
             control_rx,
             rpc_rx,
+            streaming_rpc_rx,
             watch_tx,
             invoker.handle(),
         );
@@ -913,6 +998,7 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
             key_range,
             PartitionProcessorHandle::new(control_tx),
             rpc_tx,
+            streaming_rpc_tx,
             watch_rx,
         ))
     }

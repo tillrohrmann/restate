@@ -284,6 +284,17 @@ impl<O> Reciprocal<O> {
             },
         }
     }
+
+    pub fn prepare_streaming(&self, body: O) -> Outgoing<O, HasConnection> {
+        Outgoing {
+            connection: HasConnection(self.connection.clone()),
+            body,
+            meta: MsgMeta {
+                msg_id: generate_msg_id(),
+                in_response_to: Some(self.in_response_to),
+            },
+        }
+    }
 }
 
 /// A wrapper for outgoing messages that includes the correlation information if a message is in
@@ -361,6 +372,10 @@ impl<M> Outgoing<M, HasConnection> {
             body: self.body,
             meta: self.meta,
         }
+    }
+
+    pub fn connection(&self) -> &WeakConnection {
+        &self.connection.0
     }
 }
 

@@ -54,6 +54,11 @@ pub enum RequestDispatcherError {
 /// All retry policies and business logic is handled by the implementation.
 #[cfg_attr(test, mockall::automock)]
 pub trait RequestDispatcher {
+    fn submit_invocation(
+        &self,
+        service_invocation: ServiceInvocation,
+    ) -> impl Future<Output = Result<InvocationOutput, RequestDispatcherError>> + Send;
+
     /// Append an invocation to the partition processor and wait for the [`SubmittedInvocationNotification`].
     fn append_invocation_and_wait_submit_notification_if_needed(
         &self,

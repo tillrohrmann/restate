@@ -45,9 +45,10 @@ use restate_types::identifiers::{
 use restate_types::identifiers::{LeaderEpoch, PartitionId, PartitionLeaderEpoch};
 use restate_types::logs::LogId;
 use restate_types::message::MessageIndex;
+use restate_types::net::codec::{Targeted, WireEncode};
 use restate_types::net::partition_processor::{
     InvocationOutput, PartitionProcessorRpcError, PartitionProcessorRpcResponse,
-    SubmittedInvocationNotification,
+    StreamingPartitionProcessorRpcResponse, SubmittedInvocationNotification,
 };
 use restate_types::storage::StorageEncodeError;
 use restate_types::time::MillisSinceEpoch;
@@ -92,6 +93,13 @@ pub(crate) enum ActionEffect {
     AwaitingRpcSelfProposeDone,
 }
 
+pub enum Rpc {
+    Streaming(
+        Reciprocal<Result<StreamingPartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
+    ),
+    Normal(Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>),
+}
+
 pub(crate) struct LeaderState {
     leader_epoch: LeaderEpoch,
     shuffle_hint_tx: HintSender,
@@ -99,10 +107,7 @@ pub(crate) struct LeaderState {
     timer_service: Pin<Box<TimerService>>,
     self_proposer: SelfProposer,
 
-    awaiting_rpc_actions: HashMap<
-        PartitionProcessorRpcRequestId,
-        Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
-    >,
+    awaiting_rpc_actions: HashMap<PartitionProcessorRpcRequestId, Rpc>,
     awaiting_rpc_self_propose: FuturesUnordered<SelfAppendFuture>,
 
     invoker_stream: ReceiverStream<restate_invoker_api::Effect>,
@@ -525,11 +530,22 @@ where
 
                 // Reply to all RPCs with not a leader
                 for (_, reciprocal) in awaiting_rpc_actions.drain() {
-                    respond_to_rpc(
-                        reciprocal.prepare(Err(PartitionProcessorRpcError::NotLeader(
-                            self.partition_processor_metadata.partition_id,
-                        ))),
-                    );
+                    match reciprocal {
+                        Rpc::Streaming(reciprocal) => {
+                            respond_to_rpc(reciprocal.prepare(Err(
+                                PartitionProcessorRpcError::NotLeader(
+                                    self.partition_processor_metadata.partition_id,
+                                ),
+                            )));
+                        }
+                        Rpc::Normal(reciprocal) => {
+                            respond_to_rpc(reciprocal.prepare(Err(
+                                PartitionProcessorRpcError::NotLeader(
+                                    self.partition_processor_metadata.partition_id,
+                                ),
+                            )));
+                        }
+                    }
                 }
                 for fut in awaiting_rpc_self_appends.iter_mut() {
                     fut.fail_with_not_leader(self.partition_processor_metadata.partition_id);
@@ -584,10 +600,7 @@ where
         shuffle_hint_tx: &HintSender,
         mut timer_service: Pin<&mut TimerService>,
         actions_effects: &mut VecDeque<(InvocationId, Duration)>,
-        awaiting_rpcs: &mut HashMap<
-            PartitionProcessorRpcRequestId,
-            Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
-        >,
+        awaiting_rpcs: &mut HashMap<PartitionProcessorRpcRequestId, Rpc>,
     ) -> Result<(), Error> {
         match action {
             Action::Invoke {
@@ -637,16 +650,28 @@ where
                 ..
             } => {
                 if let Some(response_tx) = awaiting_rpcs.remove(&request_id) {
-                    respond_to_rpc(
-                        response_tx.prepare(Ok(PartitionProcessorRpcResponse::Output(
-                            InvocationOutput {
-                                request_id,
-                                invocation_id,
-                                completion_expiry_time,
-                                response,
-                            },
-                        ))),
-                    );
+                    match response_tx {
+                        Rpc::Streaming(response_tx) => {
+                            respond_to_rpc(response_tx.prepare(Ok(
+                                StreamingPartitionProcessorRpcResponse::Output(InvocationOutput {
+                                    request_id,
+                                    invocation_id,
+                                    completion_expiry_time,
+                                    response,
+                                }),
+                            )));
+                        }
+                        Rpc::Normal(response_tx) => {
+                            respond_to_rpc(response_tx.prepare(Ok(
+                                PartitionProcessorRpcResponse::Output(InvocationOutput {
+                                    request_id,
+                                    invocation_id,
+                                    completion_expiry_time,
+                                    response,
+                                }),
+                            )));
+                        }
+                    }
                 }
             }
             Action::IngressSubmitNotification {
@@ -655,12 +680,30 @@ where
                 ..
             } => {
                 if let Some(response_tx) = awaiting_rpcs.remove(&request_id) {
-                    respond_to_rpc(response_tx.prepare(Ok(
-                        PartitionProcessorRpcResponse::Submitted(SubmittedInvocationNotification {
-                            request_id,
-                            is_new_invocation,
-                        }),
-                    )));
+                    match response_tx {
+                        Rpc::Streaming(response_tx) => {
+                            respond_to_rpc(response_tx.prepare_streaming(Ok(
+                                StreamingPartitionProcessorRpcResponse::Submitted(
+                                    SubmittedInvocationNotification {
+                                        request_id,
+                                        is_new_invocation,
+                                    },
+                                ),
+                            )));
+
+                            awaiting_rpcs.insert(request_id, Rpc::Streaming(response_tx));
+                        }
+                        Rpc::Normal(response_tx) => {
+                            respond_to_rpc(response_tx.prepare(Ok(
+                                PartitionProcessorRpcResponse::Submitted(
+                                    SubmittedInvocationNotification {
+                                        request_id,
+                                        is_new_invocation,
+                                    },
+                                ),
+                            )));
+                        }
+                    }
                 }
             }
             Action::ScheduleInvocationStatusCleanup {
@@ -787,28 +830,47 @@ where
     pub async fn handle_rpc_proposal_command(
         &mut self,
         request_id: PartitionProcessorRpcRequestId,
-        reciprocal: Reciprocal<Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>>,
+        reciprocal: Rpc,
         partition_key: PartitionKey,
         cmd: Command,
     ) {
         match &mut self.state {
-            State::Follower | State::Candidate { .. } => {
-                // Just fail the rpc
-                respond_to_rpc(
-                    reciprocal.prepare(Err(PartitionProcessorRpcError::NotLeader(
-                        self.partition_processor_metadata.partition_id,
-                    ))),
-                );
-            }
+            State::Follower | State::Candidate { .. } => match reciprocal {
+                Rpc::Streaming(reciprocal) => {
+                    respond_to_rpc(
+                        reciprocal.prepare(Err(PartitionProcessorRpcError::NotLeader(
+                            self.partition_processor_metadata.partition_id,
+                        ))),
+                    );
+                }
+                Rpc::Normal(reciprocal) => {
+                    respond_to_rpc(
+                        reciprocal.prepare(Err(PartitionProcessorRpcError::NotLeader(
+                            self.partition_processor_metadata.partition_id,
+                        ))),
+                    );
+                }
+            },
             State::Leader(leader_state) => {
                 match leader_state.awaiting_rpc_actions.entry(request_id) {
                     Entry::Occupied(o) => {
                         // In this case, someone already proposed this command,
                         // let's just replace the reciprocal and fail the old one to avoid keeping it dangling
                         let old_reciprocal = o.remove();
-                        respond_to_rpc(old_reciprocal.prepare(Err(
-                            PartitionProcessorRpcError::Internal("expired".to_string()),
-                        )));
+
+                        match old_reciprocal {
+                            Rpc::Streaming(old_reciprocal) => {
+                                respond_to_rpc(old_reciprocal.prepare(Err(
+                                    PartitionProcessorRpcError::Internal("expired".to_string()),
+                                )));
+                            }
+                            Rpc::Normal(old_reciprocal) => {
+                                respond_to_rpc(old_reciprocal.prepare(Err(
+                                    PartitionProcessorRpcError::Internal("expired".to_string()),
+                                )));
+                            }
+                        }
+
                         leader_state
                             .awaiting_rpc_actions
                             .insert(request_id, reciprocal);
@@ -817,11 +879,18 @@ where
                         // In this case, no one proposed this command yet, let's try to propose it
                         if let Err(e) = leader_state.self_proposer.propose(partition_key, cmd).await
                         {
-                            respond_to_rpc(
-                                reciprocal.prepare(Err(PartitionProcessorRpcError::Internal(
-                                    e.to_string(),
-                                ))),
-                            );
+                            match reciprocal {
+                                Rpc::Streaming(reciprocal) => {
+                                    respond_to_rpc(reciprocal.prepare(Err(
+                                        PartitionProcessorRpcError::Internal(e.to_string()),
+                                    )));
+                                }
+                                Rpc::Normal(reciprocal) => {
+                                    respond_to_rpc(reciprocal.prepare(Err(
+                                        PartitionProcessorRpcError::Internal(e.to_string()),
+                                    )));
+                                }
+                            }
                         } else {
                             v.insert(reciprocal);
                         }
@@ -866,12 +935,11 @@ where
     }
 }
 
-fn respond_to_rpc(
-    outgoing: Outgoing<
-        Result<PartitionProcessorRpcResponse, PartitionProcessorRpcError>,
-        HasConnection,
-    >,
-) {
+fn respond_to_rpc<T: Send + Sync + Debug + 'static>(
+    outgoing: Outgoing<Result<T, PartitionProcessorRpcError>, HasConnection>,
+) where
+    Result<T, PartitionProcessorRpcError>: Targeted + WireEncode,
+{
     // ignore shutdown errors
     let _ = task_center().spawn(
         TaskKind::Disposable,

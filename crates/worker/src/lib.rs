@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 
 use restate_bifrost::Bifrost;
 use restate_core::network::partition_processor_rpc_client::PartitionProcessorRpcClient;
-use restate_core::network::rpc_router::RpcRouter;
+use restate_core::network::rpc_router::{RpcRouter, StreamingRpcRouter};
 use restate_core::network::MessageRouterBuilder;
 use restate_core::network::Networking;
 use restate_core::network::TransportConnect;
@@ -62,7 +62,7 @@ type PartitionProcessorBuilder = partition::PartitionProcessorBuilder<
     InvokerChannelServiceHandle<InvokerStorageReader<PartitionStore>>,
 >;
 
-type ExternalClientIngress<T> = HyperServerIngress<Schema, RpcRequestDispatcher<Networking<T>>>;
+type ExternalClientIngress<T> = HyperServerIngress<Schema, RpcRequestDispatcher<T>>;
 
 #[derive(Debug, thiserror::Error, CodedError)]
 #[error("failed creating worker: {0}")]
@@ -145,16 +145,21 @@ impl<T: TransportConnect> Worker<T> {
         .await?;
 
         let rpc_router = RpcRouter::new(router_builder);
+        let streaming_rpc_router = StreamingRpcRouter::new(router_builder);
         let partition_table = metadata.updateable_partition_table();
         // http ingress
+        let rpc_client = PartitionProcessorRpcClient::new(
+            networking.clone(),
+            rpc_router,
+            streaming_rpc_router.clone(),
+            partition_table.clone(),
+            partition_routing.clone(),
+        );
         let ingress_http = HyperServerIngress::from_options(
             &config.ingress,
-            RpcRequestDispatcher::new(PartitionProcessorRpcClient::new(
-                networking.clone(),
-                rpc_router,
-                partition_table,
-                partition_routing,
-            )),
+            RpcRequestDispatcher::new(
+                rpc_client,
+            ),
             schema.clone(),
         );
 
