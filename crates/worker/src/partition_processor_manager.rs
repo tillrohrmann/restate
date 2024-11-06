@@ -20,7 +20,7 @@ use futures::stream::StreamExt;
 use futures::Stream;
 use metrics::gauge;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tokio::time::MissedTickBehavior;
@@ -105,6 +105,8 @@ pub struct PartitionProcessorManager<T> {
     persisted_lsns_rx: Option<watch::Receiver<BTreeMap<PartitionId, Lsn>>>,
     invokers_status_reader: MultiplexedInvokerStatusReader,
     pending_control_processors: Option<ControlProcessors>,
+
+    concurrent_partition_processor_starts: Arc<Semaphore>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -423,6 +425,7 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
             persisted_lsns_rx: None,
             invokers_status_reader: MultiplexedInvokerStatusReader::default(),
             pending_control_processors: None,
+            concurrent_partition_processor_starts: Arc::new(Semaphore::new(8)),
         }
     }
 
@@ -810,15 +813,20 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                         events,
                     );
 
+                    let concurrent_starts = Arc::clone(&self.concurrent_partition_processor_starts);
+
                     // note: We starting each task on it's own thread due to an issue that shows up on MacOS
                     // where spawning many tasks of this kind causes a lock contention in tokio which leads to
                     // starvation of the event loop.
                     let handle = self.task_center.spawn_blocking_unmanaged(
                         "starting-partition-processor",
                         Some(partition_id),
-                        starting_task.run().instrument(
-                            debug_span!("starting_partition_processor", partition_id=%partition_id),
-                        ),
+                        async move {
+                            let _permit = concurrent_starts.acquire().await.expect("obtain permit");
+                            starting_task.run().instrument(
+                                debug_span!("starting_partition_processor", partition_id=%partition_id),
+                            ).await
+                        },
                     );
 
                     self.running_partition_processors
@@ -852,13 +860,21 @@ impl<T: TransportConnect> PartitionProcessorManager<T> {
                             events.clone(),
                         );
 
+                        let concurrent_starts =
+                            Arc::clone(&self.concurrent_partition_processor_starts);
+
                         // note: We starting each task on it's own thread due to an issue that shows up on MacOS
                         // where spawning many tasks of this kind causes a lock contention in tokio which leads to
                         // starvation of the event loop.
                         let handle = self.task_center.spawn_blocking_unmanaged(
                             "starting-partition-processor",
                             Some(action.partition_id),
-                            starting_task.run().instrument(debug_span!("starting_partition_processor", partition_id=%action.partition_id)),
+                            async move {
+                                let _permit = concurrent_starts.acquire().await.expect("obtain permit");
+                                starting_task.run().instrument(
+                                    debug_span!("starting_partition_processor", partition_id=%action.partition_id),
+                                ).await
+                            },
                         );
 
                         self.running_partition_processors
