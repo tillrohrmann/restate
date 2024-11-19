@@ -243,95 +243,6 @@ impl<T: TransportConnect> Service<T> {
         }
     }
 
-    async fn next_cluster_state(
-        &self,
-        state: &mut ClusterControllerState<T>,
-    ) -> anyhow::Result<()> {
-        let nodes_config = self.metadata.nodes_config_ref();
-        let maybe_active = nodes_config
-            .get_admin_nodes()
-            .filter(|node| {
-                self.observed_cluster_state
-                    .is_node_alive(node.current_generation)
-            })
-            .map(|node| node.current_generation.as_plain())
-            .sorted()
-            .next();
-
-        // A Cluster Controller is active if the node holds the smallest PlainNodeID
-        // If no other node was found to take leadership, we assume leadership
-
-        let is_leader = match maybe_active {
-            None => true,
-            Some(leader) => leader == self.metadata.my_node_id().as_plain(),
-        };
-
-        match (is_leader, &state) {
-            (true, ClusterControllerState::Leader(_))
-            | (false, ClusterControllerState::Follower) => {
-                // nothing to do
-            }
-            (true, ClusterControllerState::Follower) => {
-                debug!("Cluster controller switching to leader mode");
-                *state = ClusterControllerState::Leader(self.create_leader().await?);
-            }
-            (false, ClusterControllerState::Leader(_)) => {
-                debug!("Cluster controller switching to follower mode");
-                *state = ClusterControllerState::Follower;
-            }
-        };
-
-        Ok(())
-    }
-
-    async fn create_leader<'a>(&self) -> anyhow::Result<Leader<T>> {
-        let configuration = self.configuration.pinned();
-
-        let scheduler = Scheduler::init(
-            &configuration,
-            self.task_center.clone(),
-            self.metadata_store_client.clone(),
-            self.networking.clone(),
-        )
-        .await?;
-
-        let logs_controller = LogsController::init(
-            &configuration,
-            self.metadata.clone(),
-            self.bifrost.clone(),
-            self.metadata_store_client.clone(),
-            self.metadata_writer.clone(),
-        )
-        .await?;
-
-        let (log_trim_interval, log_trim_threshold) =
-            create_log_trim_interval(&configuration.admin);
-
-        let mut find_logs_tail_interval =
-            time::interval(configuration.admin.log_tail_update_interval.into());
-        find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-        let leader = Leader {
-            metadata: self.metadata.clone(),
-            bifrost: self.bifrost.clone(),
-            metadata_store_client: self.metadata_store_client.clone(),
-            metadata_writer: self.metadata_writer.clone(),
-            logs_watcher: self.metadata.watch(MetadataKind::Logs),
-            nodes_config: self.metadata.updateable_nodes_config(),
-            partition_table: self.metadata.updateable_partition_table(),
-            partition_table_watcher: self.metadata.watch(MetadataKind::PartitionTable),
-            cluster_state_watcher: self.cluster_state_refresher.cluster_state_watcher(),
-            find_logs_tail_interval,
-            log_trim_interval,
-            log_trim_threshold,
-            logs: self.metadata.updateable_logs_metadata(),
-            logs_controller,
-            scheduler,
-        };
-
-        Ok(leader)
-    }
-
     pub async fn run(mut self) -> anyhow::Result<()> {
         self.init_partition_table().await?;
 
@@ -358,7 +269,7 @@ impl<T: TransportConnect> Service<T> {
         self.health_status.update(AdminStatus::Ready);
 
         loop {
-            self.next_cluster_state(&mut state).await?;
+            state.update_cluster_state(&self).await?;
 
             tokio::select! {
                 _ = self.heartbeat_interval.tick() => {
@@ -528,6 +439,45 @@ where
         }
     }
 
+    async fn update_cluster_state(&mut self, service: &Service<T>) -> anyhow::Result<()> {
+        let nodes_config = service.metadata.nodes_config_ref();
+        let maybe_active = nodes_config
+            .get_admin_nodes()
+            .filter(|node| {
+                service
+                    .observed_cluster_state
+                    .is_node_alive(node.current_generation)
+            })
+            .map(|node| node.current_generation.as_plain())
+            .sorted()
+            .next();
+
+        // A Cluster Controller is active if the node holds the smallest PlainNodeID
+        // If no other node was found to take leadership, we assume leadership
+
+        let is_leader = match maybe_active {
+            None => true,
+            Some(leader) => leader == service.metadata.my_node_id().as_plain(),
+        };
+
+        match (is_leader, &self) {
+            (true, ClusterControllerState::Leader(_))
+            | (false, ClusterControllerState::Follower) => {
+                // nothing to do
+            }
+            (true, ClusterControllerState::Follower) => {
+                debug!("Cluster controller switching to leader mode");
+                *self = ClusterControllerState::Leader(Leader::from_service(service).await?);
+            }
+            (false, ClusterControllerState::Leader(_)) => {
+                debug!("Cluster controller switching to follower mode");
+                *self = ClusterControllerState::Follower;
+            }
+        };
+
+        Ok(())
+    }
+
     async fn on_observed_cluster_state(
         &mut self,
         observed_cluster_state: &ObservedClusterState,
@@ -572,6 +522,54 @@ impl<T> Leader<T>
 where
     T: TransportConnect,
 {
+    async fn from_service(service: &Service<T>) -> anyhow::Result<Leader<T>> {
+        let configuration = service.configuration.pinned();
+
+        let scheduler = Scheduler::init(
+            &configuration,
+            service.task_center.clone(),
+            service.metadata_store_client.clone(),
+            service.networking.clone(),
+        )
+        .await?;
+
+        let logs_controller = LogsController::init(
+            &configuration,
+            service.metadata.clone(),
+            service.bifrost.clone(),
+            service.metadata_store_client.clone(),
+            service.metadata_writer.clone(),
+        )
+        .await?;
+
+        let (log_trim_interval, log_trim_threshold) =
+            create_log_trim_interval(&configuration.admin);
+
+        let mut find_logs_tail_interval =
+            time::interval(configuration.admin.log_tail_update_interval.into());
+        find_logs_tail_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+        let leader = Leader {
+            metadata: service.metadata.clone(),
+            bifrost: service.bifrost.clone(),
+            metadata_store_client: service.metadata_store_client.clone(),
+            metadata_writer: service.metadata_writer.clone(),
+            logs_watcher: service.metadata.watch(MetadataKind::Logs),
+            nodes_config: service.metadata.updateable_nodes_config(),
+            partition_table: service.metadata.updateable_partition_table(),
+            partition_table_watcher: service.metadata.watch(MetadataKind::PartitionTable),
+            cluster_state_watcher: service.cluster_state_refresher.cluster_state_watcher(),
+            find_logs_tail_interval,
+            log_trim_interval,
+            log_trim_threshold,
+            logs: service.metadata.updateable_logs_metadata(),
+            logs_controller,
+            scheduler,
+        };
+
+        Ok(leader)
+    }
+
     async fn on_observed_cluster_state(
         &mut self,
         observed_cluster_state: &ObservedClusterState,
