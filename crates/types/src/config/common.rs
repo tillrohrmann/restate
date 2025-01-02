@@ -610,6 +610,11 @@ pub struct TracingOptions {
     /// Specify additional headers you want the system to send to the tracing endpoint (e.g.
     /// authentication headers).
     pub tracing_headers: SerdeableHeaderHashMap,
+
+    /// # OTLP protocol to use for exports
+    ///
+    /// The OTLP protocol to use for exporting traces.
+    pub tracing_otlp_protocol: OtlpProtocol,
 }
 
 impl Default for TracingOptions {
@@ -621,8 +626,18 @@ impl Default for TracingOptions {
             tracing_json_path: None,
             tracing_filter: "info".to_owned(),
             tracing_headers: SerdeableHeaderHashMap::default(),
+            tracing_otlp_protocol: OtlpProtocol::default(),
         }
     }
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum OtlpProtocol {
+    #[default]
+    Grpc,
+    Http,
 }
 
 #[cfg(test)]

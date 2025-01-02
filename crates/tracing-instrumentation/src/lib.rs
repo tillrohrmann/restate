@@ -19,7 +19,7 @@ use exporter::RuntimeModifierSpanExporter;
 use opentelemetry::trace::{TraceError, TracerProvider};
 use opentelemetry::{global, InstrumentationScope, KeyValue};
 use opentelemetry_contrib::trace::exporter::jaeger_json::JaegerJsonExporter;
-use opentelemetry_otlp::{SpanExporter, WithExportConfig, WithTonicConfig};
+use opentelemetry_otlp::{SpanExporter, WithExportConfig, WithHttpConfig, WithTonicConfig};
 use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::trace::BatchSpanProcessor;
 use pretty::Pretty;
@@ -35,7 +35,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-use restate_types::config::{CommonOptions, LogFormat};
+use restate_types::config::{CommonOptions, LogFormat, OtlpProtocol, TracingOptions};
 #[cfg(feature = "console-subscriber")]
 use restate_types::net::BindAddress;
 
@@ -58,6 +58,10 @@ pub enum Error {
         e = EnvFilter::DEFAULT_ENV
     )]
     LogDirectiveParseError(#[from] ParseError),
+    #[error("cannot convert header value under key '{0}' to a string")]
+    HeaderValueNotString(String),
+    #[error("failed initializing http client: {0}")]
+    HttpClient(#[from] reqwest::Error),
 }
 
 /// creates and register a global opentelemetry tracer provider. The global
@@ -93,16 +97,9 @@ fn build_services_tracing(common_opts: &CommonOptions) -> Result<(), Error> {
         ),
     ]);
 
-    let header_map = HeaderMap::from_iter(HashMap::from(opts.tracing_headers.clone()));
+    let span_exporter = create_span_exporter(opts, endpoint)?;
 
-    let exporter = SpanExporter::builder()
-        .with_tonic()
-        .with_tls_config(ClientTlsConfig::new().with_native_roots())
-        .with_endpoint(endpoint)
-        .with_metadata(MetadataMap::from_headers(header_map.clone()))
-        .build()?;
-
-    let exporter = UserServiceModifierSpanExporter::new(exporter);
+    let exporter = UserServiceModifierSpanExporter::new(span_exporter);
 
     let provider = opentelemetry_sdk::trace::TracerProvider::builder()
         .with_resource(resource)
@@ -111,9 +108,44 @@ fn build_services_tracing(common_opts: &CommonOptions) -> Result<(), Error> {
         )
         .build();
 
-    opentelemetry::global::set_tracer_provider(provider);
+    global::set_tracer_provider(provider);
 
     Ok(())
+}
+
+fn create_span_exporter(opts: &TracingOptions, endpoint: &String) -> Result<SpanExporter, Error> {
+    Ok(match opts.tracing_otlp_protocol {
+        OtlpProtocol::Grpc => {
+            let header_map = HeaderMap::from_iter(HashMap::from(opts.tracing_headers.clone()));
+
+            SpanExporter::builder()
+                .with_tonic()
+                .with_tls_config(ClientTlsConfig::new().with_native_roots())
+                .with_endpoint(endpoint)
+                .with_metadata(MetadataMap::from_headers(header_map.clone()))
+                .build()?
+        }
+        OtlpProtocol::Http => {
+            let headers: HashMap<_, _> = HashMap::from(opts.tracing_headers.clone())
+                .into_iter()
+                .map(|(key, value)| {
+                    value
+                        .to_str()
+                        .map_err(|_| Error::HeaderValueNotString(key.to_string()))
+                        .map(|value| (key.to_string(), value.to_owned()))
+                })
+                .collect::<Result<_, _>>()?;
+
+            let client = reqwest::Client::builder().build()?;
+
+            SpanExporter::builder()
+                .with_http()
+                .with_endpoint(endpoint)
+                .with_headers(headers)
+                .with_http_client(client)
+                .build()?
+        }
+    })
 }
 
 #[allow(clippy::type_complexity, dead_code)]
@@ -165,17 +197,9 @@ where
         opentelemetry_sdk::trace::TracerProvider::builder().with_resource(resource);
 
     if let Some(endpoint) = endpoint {
-        let header_map =
-            HeaderMap::from_iter(HashMap::from(common_opts.tracing.tracing_headers.clone()));
+        let span_exporter = create_span_exporter(&common_opts.tracing, endpoint)?;
 
-        let exporter = SpanExporter::builder()
-            .with_tonic()
-            .with_tls_config(ClientTlsConfig::new().with_native_roots())
-            .with_endpoint(endpoint)
-            .with_metadata(MetadataMap::from_headers(header_map))
-            .build()?;
-
-        let exporter = RuntimeModifierSpanExporter::new(exporter);
+        let exporter = RuntimeModifierSpanExporter::new(span_exporter);
         tracer_provider_builder = tracer_provider_builder.with_span_processor(
             BatchSpanProcessor::builder(exporter, opentelemetry_sdk::runtime::Tokio).build(),
         );
