@@ -10,7 +10,7 @@
 
 use crate::raft::storage::keys::{
     CONF_STATE_KEY, HARD_STATE_KEY, LogEntryKey, MARKER_KEY, NODES_CONFIGURATION_KEY,
-    RAFT_SERVER_STATE_KEY, SNAPSHOT_KEY,
+    RAFT_SERVER_STATE_KEY, SNAPSHOT_KEY, STAGING_MARKER_KEY,
 };
 use crate::raft::storage::rocksdb_builder::build_rocksdb;
 use crate::raft::storage::{DATA_CF, METADATA_CF};
@@ -137,6 +137,36 @@ impl RocksDbStorage {
         Ok(is_empty)
     }
 
+    pub(crate) async fn clear(&mut self) -> Result<(), Error> {
+        // todo investigate whether drop cf and then create cf is possible as a faster way for
+        //  cleaning up.
+        let mut wb = WriteBatch::default();
+
+        {
+            let metadata_cf = self.metadata_cf();
+            wb.delete_cf(&metadata_cf, CONF_STATE_KEY);
+            wb.delete_cf(&metadata_cf, HARD_STATE_KEY);
+            wb.delete_cf(&metadata_cf, SNAPSHOT_KEY);
+            wb.delete_cf(&metadata_cf, NODES_CONFIGURATION_KEY);
+            wb.delete_cf(&metadata_cf, RAFT_SERVER_STATE_KEY);
+            wb.delete_cf(&metadata_cf, MARKER_KEY);
+            wb.delete_cf(&metadata_cf, STAGING_MARKER_KEY);
+
+            let data_cf = self.data_cf();
+            for index in self.get_first_index()..=self.get_last_index() {
+                let key = LogEntryKey::new(index);
+                wb.delete_cf(&data_cf, key.to_bytes());
+            }
+        }
+
+        self.commit_write_batch(wb).await?;
+
+        self.first_index = 1;
+        self.last_index = 0;
+
+        Ok(())
+    }
+
     pub fn requested_snapshot(&self) -> Option<u64> {
         *self.requested_snapshot.borrow()
     }
@@ -169,6 +199,16 @@ impl RocksDbStorage {
 
     pub fn get_marker(&self) -> Result<Option<StorageMarker>, Error> {
         if let Some(bytes) = self.get_bytes_metadata_cf(MARKER_KEY)? {
+            Ok(Some(
+                StorageMarker::from_slice(&bytes).map_err(|err| Error::Decode(err.into()))?,
+            ))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn get_staging_marker(&self) -> Result<Option<StorageMarker>, Error> {
+        if let Some(bytes) = self.get_bytes_metadata_cf(STAGING_MARKER_KEY)? {
             Ok(Some(
                 StorageMarker::from_slice(&bytes).map_err(|err| Error::Decode(err.into()))?,
             ))
@@ -629,8 +669,24 @@ impl<'a> Transaction<'a> {
         Ok(())
     }
 
+    pub fn stage_marker(&mut self, storage_marker: &StorageMarker) {
+        self.put_bytes_metadata_cf(STAGING_MARKER_KEY, storage_marker.to_bytes())
+    }
+
     pub fn store_marker(&mut self, storage_marker: &StorageMarker) {
         self.put_bytes_metadata_cf(MARKER_KEY, storage_marker.to_bytes())
+    }
+
+    /// Release the staging storage marker by moving it from [`STAGING_MARKER_KEY`] to
+    /// [`MARKER_KEY`].
+    pub(crate) fn release_staging_marker(&mut self) -> Result<(), Error> {
+        let storage_marker = self
+            .storage
+            .get_staging_marker()?
+            .expect("staging storage marker has been set before");
+        self.delete_metadata_cf(STAGING_MARKER_KEY);
+        self.put_bytes_metadata_cf(MARKER_KEY, storage_marker.to_bytes());
+        Ok(())
     }
 
     pub fn store_raft_server_state(
@@ -723,6 +779,12 @@ impl<'a> Transaction<'a> {
         write_batch.put_cf(&self.storage.metadata_cf(), key.as_ref(), value.as_ref());
         self.write_batch = write_batch;
     }
+
+    fn delete_metadata_cf(&mut self, key: impl AsRef<[u8]>) {
+        let mut write_batch = mem::take(&mut self.write_batch);
+        write_batch.delete_cf(&self.storage.metadata_cf(), key.as_ref());
+        self.write_batch = write_batch;
+    }
 }
 
 fn other_error<E>(error: E) -> raft::Error
@@ -754,6 +816,52 @@ mod tests {
         assert_eq!(storage.get_last_index(), 0);
         assert_eq!(storage.get_first_index(), 1);
         assert_eq!(storage.get_snapshot()?, Snapshot::default());
+
+        RocksDbManager::get().shutdown().await;
+        Ok(())
+    }
+
+    #[test_log::test(restate_core::test)]
+    async fn clear_db() -> googletest::Result<()> {
+        RocksDbManager::init(Constant::new(CommonOptions::default()));
+        let mut storage = RocksDbStorage::create(
+            &MetadataServerOptions::default(),
+            Constant::new(RocksDbOptions::default()).boxed(),
+        )
+        .await?;
+
+        assert!(storage.is_empty()?);
+
+        // populate the storage with a few entries and a snapshot
+        let last_index = 10;
+        let snapshot_index = 5;
+        let entries = (1..=last_index)
+            .map(|index| Entry {
+                index,
+                term: index,
+                data: index.to_be_bytes().to_vec().into(),
+                ..Entry::default()
+            })
+            .collect();
+
+        storage.append(&entries).await?;
+
+        let mut conf_state = ConfState::default();
+        conf_state.set_voters(vec![1, 2, 3]);
+        let mut snapshot = Snapshot::default();
+        snapshot.mut_metadata().set_index(snapshot_index);
+        snapshot.mut_metadata().set_term(snapshot_index);
+        snapshot.mut_metadata().set_conf_state(conf_state.clone());
+        snapshot.set_data(vec![4, 5, 6].into());
+
+        storage.apply_snapshot(&snapshot).await?;
+
+        // it should no longer be empty
+        assert!(!storage.is_empty()?);
+
+        // clearing the storage should leave it in an empty state
+        storage.clear().await?;
+        assert!(storage.is_empty()?);
 
         RocksDbManager::get().shutdown().await;
         Ok(())

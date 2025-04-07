@@ -8,6 +8,7 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
+use super::network::grpc_svc::new_metadata_server_network_client;
 use crate::grpc::MetadataServerSnapshot;
 use crate::grpc::handler::MetadataServerHandler;
 use crate::local::migrate_nodes_configuration;
@@ -51,6 +52,7 @@ use restate_core::network::net_util::create_tonic_channel;
 use restate_core::{
     Metadata, MetadataWriter, ShutdownError, TaskCenter, TaskKind, cancellation_watcher,
 };
+use restate_rocksdb::RocksError;
 use restate_types::config::{
     Configuration, MetadataServerKind, MetadataServerOptions, RocksDbOptions,
 };
@@ -75,8 +77,6 @@ use tokio::time::{Interval, MissedTickBehavior};
 use tracing::{Span, debug, error, info, instrument, trace, warn};
 use tracing_slog::TracingSlogDrain;
 use ulid::Ulid;
-
-use super::network::grpc_svc::new_metadata_server_network_client;
 
 const RAFT_INITIAL_LOG_TERM: u64 = 1;
 const RAFT_INITIAL_LOG_INDEX: u64 = 1;
@@ -261,6 +261,15 @@ impl RaftMetadataServer {
             self.provision().await?;
         } else {
             debug!("Replicated metadata store is already provisioned");
+            // For forward compatibility we try to seal a potentially migrated local metadata server
+            // db, in case it did not happen yet (Restate versions <= 1.3.0 weren't doing it).
+            if let Err(err) = Self::try_sealing_local_metadata_server().await {
+                // If we are in this branch, then we assume that users have explicitly configured
+                // the replicated metadata server. Hence, if sealing fails, it is not a catastrophe.
+                warn!(%err, "Failed sealing local metadata server. This can be problematic if you \
+                ever switch back to the local metadata server either explicitly or by rolling back \
+                to a Restate version <= 1.3.");
+            }
         }
 
         let mut provision_rx = self.provision_rx.take().expect("must be present");
@@ -298,7 +307,7 @@ impl RaftMetadataServer {
         if local::storage::RocksDbStorage::data_dir_exists() {
             info!("Trying to migrate local to replicated metadata");
 
-            let my_member_id = self
+            self
                 .initialize_storage_from_local_metadata_server()
                 .await
                 .map_err(|err| {
@@ -308,7 +317,7 @@ impl RaftMetadataServer {
                     Error::ProvisionFromLocal(err.into())
                 })?;
 
-            info!(member_id = %my_member_id, "Successfully migrated local to replicated metadata");
+            info!("Successfully migrated local to replicated metadata");
         } else {
             self.await_provisioning_signal().await?
         }
@@ -336,9 +345,9 @@ impl RaftMetadataServer {
                 },
                 Some(request) = self.provision_rx.as_mut().expect("must be present").recv() => {
                     match self.initialize_storage_from_nodes_configuration(request.nodes_configuration).await {
-                        Ok(my_member_id) => {
+                        Ok(()) => {
                             let _ = request.result_tx.send(Ok(true));
-                            debug!(member_id = %my_member_id, "Successfully provisioned the metadata store");
+                            debug!("Successfully provisioned the metadata store");
                             return Ok(());
                         },
                         Err(err) => {
@@ -369,7 +378,7 @@ impl RaftMetadataServer {
     async fn initialize_storage_from_nodes_configuration(
         &mut self,
         mut nodes_configuration: NodesConfiguration,
-    ) -> anyhow::Result<MemberId> {
+    ) -> anyhow::Result<()> {
         debug!("Initialize storage from nodes configuration");
 
         let my_plain_node_id = prepare_initial_nodes_configuration(
@@ -385,75 +394,98 @@ impl RaftMetadataServer {
             Precondition::DoesNotExist,
         )?;
 
-        self.initialize_storage(my_plain_node_id, initial_state)
-            .await
+        self.start_storage_initialization(my_plain_node_id, initial_state)
+            .await?;
+        self.finish_storage_initialization().await
     }
 
-    async fn initialize_storage_from_local_metadata_server(&mut self) -> anyhow::Result<MemberId> {
-        let mut initial_state = self.load_initial_state_from_local_metadata_server().await?;
-        let mut nodes_configuration = initial_state.last_seen_nodes_configuration().clone();
+    async fn initialize_storage_from_local_metadata_server(&mut self) -> anyhow::Result<()> {
+        let mut local_storage = Self::open_local_metadata_storage().await?;
 
-        let previous_version = nodes_configuration.version();
-        let my_plain_node_id = prepare_initial_nodes_configuration(
-            &Configuration::pinned(),
-            &mut nodes_configuration,
-        )?;
-        nodes_configuration.increment_version();
+        if !local_storage.is_sealed() {
+            // Try to migrate older nodes configuration versions
+            migrate_nodes_configuration(&mut local_storage).await?;
 
-        let versioned_value = serialize_value(&nodes_configuration)?;
-        initial_state
-            .put(
-                NODES_CONFIG_KEY.clone(),
-                versioned_value,
-                Precondition::MatchesVersion(previous_version),
-            )
-            .expect("no precondition violation");
+            let iter = local_storage.iter();
+            let mut initial_state = KvMemoryStorage::new(None);
 
-        self.initialize_storage(my_plain_node_id, initial_state)
-            .await
-    }
+            for kv_pair in iter {
+                let (key, value) = kv_pair?;
+                debug!(
+                    "Migrate key-value pair '{key}' with version '{}' from local to replicated metadata server",
+                    value.version
+                );
+                initial_state
+                    .put(key, value, Precondition::DoesNotExist)
+                    .expect("initial values should not exist");
+            }
 
-    async fn load_initial_state_from_local_metadata_server(
-        &mut self,
-    ) -> anyhow::Result<KvMemoryStorage> {
-        let local_metadata_server_options = MetadataServerOptions::default();
+            let mut nodes_configuration = initial_state.last_seen_nodes_configuration().clone();
 
-        let mut local_storage = local::storage::RocksDbStorage::create(
-            &local_metadata_server_options,
-            Constant::new(RocksDbOptions::default()).boxed(),
-        )
-        .await?;
+            let previous_version = nodes_configuration.version();
+            let my_plain_node_id = prepare_initial_nodes_configuration(
+                &Configuration::pinned(),
+                &mut nodes_configuration,
+            )?;
+            nodes_configuration.increment_version();
 
-        // Try to migrate older nodes configuration versions
-        migrate_nodes_configuration(&mut local_storage).await?;
+            let versioned_value = serialize_value(&nodes_configuration)?;
+            initial_state
+                .put(
+                    NODES_CONFIG_KEY.clone(),
+                    versioned_value,
+                    Precondition::MatchesVersion(previous_version),
+                )
+                .expect("no precondition violation");
 
-        let iter = local_storage.iter();
-        let mut kv_memory_storage = KvMemoryStorage::new(None);
+            self.start_storage_initialization(my_plain_node_id, initial_state)
+                .await?;
 
-        for kv_pair in iter {
-            let (key, value) = kv_pair?;
-            debug!(
-                "Migrate key-value pair '{key}' with version '{}' from local to replicated metadata server",
-                value.version
-            );
-            kv_memory_storage
-                .put(key, value, Precondition::DoesNotExist)
-                .expect("initial values should not exist");
+            // before we can release the storage marker and thereby finish the storage
+            // initialization, we need to seal the local metadata storage so that we are sure that
+            // no other changes can be applied to it. Only then it is safe to use the replicated
+            // metadata server.
+            local_storage.seal().await?;
+            // todo close local storage RocksDb instance
         }
 
-        // todo close underlying RocksDb instance of local_storage
-
-        Ok(kv_memory_storage)
+        self.finish_storage_initialization().await
     }
-    async fn initialize_storage(
+
+    async fn try_sealing_local_metadata_server() -> anyhow::Result<()> {
+        if local::storage::RocksDbStorage::data_dir_exists() {
+            let mut local_storage = Self::open_local_metadata_storage().await?;
+
+            if !local_storage.is_sealed() {
+                local_storage.seal().await?;
+            }
+            // todo close local storage RocksDb instance
+        }
+
+        Ok(())
+    }
+
+    async fn open_local_metadata_storage() -> Result<local::storage::RocksDbStorage, RocksError> {
+        let local_metadata_server_options = MetadataServerOptions::default();
+        local::storage::RocksDbStorage::create(
+            &local_metadata_server_options,
+            // todo configure minimal memory settings to avoid warnings
+            Constant::new(RocksDbOptions::default()).boxed(),
+        )
+        .await
+    }
+
+    async fn start_storage_initialization(
         &mut self,
         my_plain_node_id: PlainNodeId,
         initial_state: KvMemoryStorage,
-    ) -> anyhow::Result<MemberId> {
-        assert!(
-            self.storage.is_empty()?,
-            "storage must be empty to get initialized"
-        );
+    ) -> anyhow::Result<()> {
+        if !self.storage.is_empty()? {
+            // We might have tried initializing the storage before with some different initial
+            // state but failed before releasing the storage marker. Clear it to avoid invalid
+            // state.
+            self.storage.clear().await?;
+        }
 
         let storage_marker = Self::create_storage_marker();
 
@@ -490,10 +522,18 @@ impl RaftMetadataServer {
         // it's important to first apply the snapshot so that the initial entry has the right index
         txn.apply_snapshot(&snapshot)?;
         txn.store_raft_server_state(&RaftServerState::Member { my_member_id })?;
-        txn.store_marker(&storage_marker);
+        // todo remove staging of the storage marker once we no longer need to support migrating
+        //  from a local metadata server which requires sealing before releasing the marker first
+        txn.stage_marker(&storage_marker);
         txn.commit().await?;
 
-        Ok(my_member_id)
+        Ok(())
+    }
+
+    async fn finish_storage_initialization(&mut self) -> anyhow::Result<()> {
+        let mut txn = self.storage.txn();
+        txn.release_staging_marker()?;
+        txn.commit().await.map_err(Into::into)
     }
 
     fn create_storage_marker() -> StorageMarker {

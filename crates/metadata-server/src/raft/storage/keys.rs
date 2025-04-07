@@ -55,3 +55,4 @@ pub(super) const NODES_CONFIGURATION_KEY: &[u8] = b"nodes-configuration";
 pub(super) const RAFT_SERVER_STATE_KEY: &[u8] = b"raft-server-state";
 // storage marker
 pub(super) const MARKER_KEY: &[u8] = b"storage-marker";
+pub(super) const STAGING_MARKER_KEY: &[u8] = b"staging-storage-marker";
