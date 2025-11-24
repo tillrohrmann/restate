@@ -873,6 +873,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             NewEntryPriority::default(),
             vqueue_table::EntryKind::Invocation,
             vqueue_table::EntryId::from(invocation_id),
+            None::<()>,
         )
         .await?;
 
@@ -1384,19 +1385,25 @@ impl<S> StateMachineApplyContext<'_, S> {
             + WriteInboxTable
             + WriteFsmTable
             + ReadVirtualObjectStatusTable
-            + WriteVirtualObjectStatusTable,
+            + WriteVirtualObjectStatusTable
+            + WriteVQueueTable
+            + ReadVQueueTable,
     {
-        let service_status = self
-            .storage
-            .get_virtual_object_status(&mutation.service_id)
-            .await?;
+        if Configuration::pinned().common.experimental_enable_vqueues {
+            self.vqueue_enqueue_state_mutation(mutation).await?;
+        } else {
+            let service_status = self
+                .storage
+                .get_virtual_object_status(&mutation.service_id)
+                .await?;
 
-        match service_status {
-            VirtualObjectStatus::Locked(_) => {
-                self.enqueue_into_inbox(InboxEntry::StateMutation(mutation))
-                    .await?;
+            match service_status {
+                VirtualObjectStatus::Locked(_) => {
+                    self.enqueue_into_inbox(InboxEntry::StateMutation(mutation))
+                        .await?;
+                }
+                VirtualObjectStatus::Unlocked => Self::do_mutate_state(self, &mutation).await?,
             }
-            VirtualObjectStatus::Unlocked => Self::do_mutate_state(self, mutation).await?,
         }
 
         Ok(())
@@ -2772,7 +2779,9 @@ impl<S> StateMachineApplyContext<'_, S> {
             + ReadVirtualObjectStatusTable
             + WriteJournalTable
             + ReadVQueueTable
-            + WriteVQueueTable,
+            + WriteVQueueTable
+            + ReadStateTable
+            + WriteStateTable,
     {
         let qid = VQueueId::new(
             VQueueParent::from_raw(cards.parent),
@@ -2783,24 +2792,31 @@ impl<S> StateMachineApplyContext<'_, S> {
         let record_unique_ts = UniqueTimestamp::from_unix_millis(self.record_created_at).unwrap();
         for card in cards.decode_entry_cards() {
             let card = card?;
-            VQueues::new(
-                qid,
-                self.storage,
-                self.vqueues_cache,
-                self.is_leader.then_some(self.action_collector),
-            )
-            .attempt_to_run(record_unique_ts, &card)
-            .await?;
 
             match card.kind {
                 EntryKind::Unknown => {
                     panic!("Unknown card kind in inbox, cannot proceed");
                 }
                 EntryKind::StateMutation => {
-                    panic!("State mutations are not supported yet with vqueues");
-                    // self.mutate_state(state_mutation).await?;
+                    // Important: Don't go through VQueues::attempt_to_run as this will update the
+                    // VQueueMeta (acquiring a token) and the EntryCard's priority. To release the
+                    // token we would need the updated EntryCard. However, changing the EntryCard
+                    // as we update the internal storage and caches will conflict with requiring
+                    // the EntryCard to have a stable unique hash in order to confirm/remove from
+                    // unconfirmed assignments in the scheduler.
+                    self.vqueue_mutate_state(qid, &card, record_unique_ts)
+                        .await?;
                 }
                 EntryKind::Invocation => {
+                    VQueues::new(
+                        qid,
+                        self.storage,
+                        self.vqueues_cache,
+                        self.is_leader.then_some(self.action_collector),
+                    )
+                    .attempt_to_run(record_unique_ts, &card)
+                    .await?;
+
                     let invocation_id = InvocationId::from_parts(
                         qid.partition_key,
                         InvocationUuid::from_slice(card.id.as_bytes()).unwrap(),
@@ -2998,7 +3014,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                         return Ok(());
                     }
                     InboxEntry::StateMutation(state_mutation) => {
-                        self.mutate_state(state_mutation).await?;
+                        self.mutate_state(&state_mutation).await?;
                     }
                 }
             }
@@ -4956,7 +4972,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         });
     }
 
-    async fn do_mutate_state(&mut self, state_mutation: ExternalStateMutation) -> Result<(), Error>
+    async fn do_mutate_state(&mut self, state_mutation: &ExternalStateMutation) -> Result<(), Error>
     where
         S: ReadStateTable + WriteStateTable,
     {
@@ -5002,7 +5018,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             .map_err(Error::Storage)
     }
 
-    async fn mutate_state(&mut self, state_mutation: ExternalStateMutation) -> StorageResult<()>
+    async fn mutate_state(&mut self, state_mutation: &ExternalStateMutation) -> StorageResult<()>
     where
         S: ReadStateTable + WriteStateTable,
     {
@@ -5016,7 +5032,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         // are not contained in state
         let all_user_states: Vec<(Bytes, Bytes)> = self
             .storage
-            .get_all_user_states_for_service(&service_id)?
+            .get_all_user_states_for_service(service_id)?
             .try_collect()
             .await?;
 
@@ -5035,13 +5051,13 @@ impl<S> StateMachineApplyContext<'_, S> {
 
         for (key, _) in &all_user_states {
             if !state.contains_key(key) {
-                self.storage.delete_user_state(&service_id, key)?;
+                self.storage.delete_user_state(service_id, key)?;
             }
         }
 
         // overwrite existing key value pairs
         for (key, value) in state {
-            self.storage.put_user_state(&service_id, key, value)?;
+            self.storage.put_user_state(service_id, key, value)?;
         }
 
         Ok(())
@@ -5214,6 +5230,84 @@ impl<S> StateMachineApplyContext<'_, S> {
         let partition_key = invocation_id.partition_key();
 
         VQueueId::new(parent, partition_key, instance)
+    }
+
+    async fn vqueue_enqueue_state_mutation(
+        &mut self,
+        state_mutation: ExternalStateMutation,
+    ) -> Result<(), Error>
+    where
+        S: WriteVQueueTable + ReadVQueueTable + WriteFsmTable,
+    {
+        let now = UniqueTimestamp::from_unix_millis(self.record_created_at).unwrap();
+        let visible_at = VisibleAt::Now;
+
+        let service_id = &state_mutation.service_id;
+        let parent = VQueueParent::default_singleton();
+
+        let qid = VQueueId::new(
+            parent,
+            service_id.partition_key(),
+            VQueueInstance::infer_from(service_id.key.as_bytes()),
+        );
+
+        let mut vqueue = VQueues::new(
+            qid,
+            self.storage,
+            self.vqueues_cache,
+            self.is_leader.then_some(self.action_collector),
+        );
+        let seq_number = *self.inbox_seq_number;
+        vqueue
+            .enqueue_new(
+                now,
+                visible_at,
+                NewEntryPriority::UserDefault,
+                EntryKind::StateMutation,
+                // todo revisit entry id generation for state mutations
+                EntryId::from(seq_number),
+                Some(state_mutation),
+            )
+            .await?;
+
+        *self.inbox_seq_number = seq_number + 1;
+        self.storage.put_inbox_seq_number(*self.inbox_seq_number)?;
+
+        Ok(())
+    }
+
+    /// Apply the state mutation identified by the given qid and entry card.
+    ///
+    /// Important: We assume the state mutation to be in [`Stage::Inbox`]. If it's not, then it
+    /// won't be properly deleted from the underlying storage.
+    async fn vqueue_mutate_state(
+        &mut self,
+        qid: VQueueId,
+        card: &EntryCard,
+        now: UniqueTimestamp,
+    ) -> Result<(), Error>
+    where
+        S: WriteVQueueTable + ReadVQueueTable + ReadStateTable + WriteStateTable,
+    {
+        if let Some(state_mutation) = self
+            .storage
+            .get_item(&qid, card.created_at, card.kind, &card.id)
+            .await?
+        {
+            self.mutate_state(&state_mutation).await?;
+
+            let mut vqueue = VQueues::new(
+                qid,
+                self.storage,
+                self.vqueues_cache,
+                self.is_leader.then_some(self.action_collector),
+            );
+            // Right now we apply the state mutations directly from the inbox w/o going through the
+            // run stage. It's not ideal that this is an implicit contract of this method :-(
+            vqueue.end(now, Stage::Inbox, card).await?;
+        }
+
+        Ok(())
     }
 }
 
