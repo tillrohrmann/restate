@@ -377,7 +377,7 @@ where
             at,
             metadata::Action::Complete {
                 priority: card.priority,
-                was_waiting: matches!(previous_stage, Stage::Inbox),
+                previous_stage,
             },
         );
 
