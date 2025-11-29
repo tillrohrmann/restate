@@ -121,7 +121,6 @@ mod tests {
             .apply(Command::InvokerEffect(Box::new(
                 restate_invoker_api::Effect {
                     invocation_id,
-                    invocation_epoch: 0,
                     kind: restate_invoker_api::EffectKind::Paused {
                         paused_event: paused_event.clone().into(),
                     },
@@ -173,7 +172,6 @@ mod tests {
             .apply(Command::InvokerEffect(Box::new(
                 restate_invoker_api::Effect {
                     invocation_id,
-                    invocation_epoch: 0,
                     kind: restate_invoker_api::EffectKind::Paused { paused_event },
                 },
             )))

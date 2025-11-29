@@ -81,11 +81,11 @@ use restate_types::invocation::client::{
     PurgeInvocationResponse, ResumeInvocationResponse,
 };
 use restate_types::invocation::{
-    AttachInvocationRequest, IngressInvocationResponseSink, InvocationEpoch,
-    InvocationMutationResponseSink, InvocationQuery, InvocationResponse, InvocationTarget,
-    InvocationTargetType, InvocationTermination, JournalCompletionTarget, NotifySignalRequest,
-    ResponseResult, ServiceInvocation, ServiceInvocationResponseSink, ServiceInvocationSpanContext,
-    ServiceType, Source, SubmitNotificationSink, TerminationFlavor, VirtualObjectHandlerType,
+    AttachInvocationRequest, IngressInvocationResponseSink, InvocationMutationResponseSink,
+    InvocationQuery, InvocationResponse, InvocationTarget, InvocationTargetType,
+    InvocationTermination, JournalCompletionTarget, NotifySignalRequest, ResponseResult,
+    ServiceInvocation, ServiceInvocationResponseSink, ServiceInvocationSpanContext, ServiceType,
+    Source, SubmitNotificationSink, TerminationFlavor, VirtualObjectHandlerType,
     WorkflowHandlerType,
 };
 use restate_types::invocation::{InvocationInput, SpanRelation};
@@ -334,7 +334,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         S: WriteTimerTable,
     {
         match timer_value.value() {
-            Timer::CompleteJournalEntry(_, entry_index, _) => {
+            Timer::CompleteJournalEntry(_, entry_index) => {
                 info_span_if_leader!(
                     self.is_leader,
                     span_context.is_sampled(),
@@ -398,12 +398,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         Ok(())
     }
 
-    fn forward_notification(
-        &mut self,
-        invocation_id: InvocationId,
-        invocation_epoch: InvocationEpoch,
-        notification: RawNotification,
-    ) {
+    fn forward_notification(&mut self, invocation_id: InvocationId, notification: RawNotification) {
         debug_if_leader!(
             self.is_leader,
             restate.notification.id = %notification.id(),
@@ -412,26 +407,19 @@ impl<S> StateMachineApplyContext<'_, S> {
 
         self.action_collector.push(Action::ForwardNotification {
             invocation_id,
-            invocation_epoch,
             notification,
         });
     }
 
-    fn send_abort_invocation_to_invoker(
-        &mut self,
-        invocation_id: InvocationId,
-        invocation_epoch: InvocationEpoch,
-    ) {
+    fn send_abort_invocation_to_invoker(&mut self, invocation_id: InvocationId) {
         debug_if_leader!(
             self.is_leader,
             restate.invocation.id = %invocation_id,
             "Send abort command to invoker"
         );
 
-        self.action_collector.push(Action::AbortInvocation {
-            invocation_id,
-            invocation_epoch,
-        });
+        self.action_collector
+            .push(Action::AbortInvocation { invocation_id });
     }
 
     async fn on_apply(&mut self, command: Command) -> Result<(), Error>
@@ -553,7 +541,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                 if should_use_journal_table_v2(&status) {
                     lifecycle::OnNotifyInvocationResponse {
                         invocation_id: target.caller_id,
-                        invocation_epoch: target.caller_invocation_epoch,
                         status,
                         caller_completion_id: target.caller_completion_id,
                         result,
@@ -1282,7 +1269,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                     .span_context
                     .clone(),
                 None,
-                in_flight_invocation_metadata.current_invocation_epoch,
                 self.record_created_at,
                 in_flight_invocation_metadata
                     .random_seed
@@ -1355,7 +1341,6 @@ impl<S> StateMachineApplyContext<'_, S> {
 
         self.action_collector.push(Action::Invoke {
             invocation_id,
-            invocation_epoch: in_flight_invocation_metadata.current_invocation_epoch,
             invocation_target: in_flight_invocation_metadata.invocation_target.clone(),
             invoke_input_journal,
         });
@@ -1527,7 +1512,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 // This can happen because the invoke/resume and the abort invoker messages end up in different queues,
                 // and the abort message can overtake the invoke/resume.
                 // Consequently the invoker might have not received the abort and the user tried to send it again.
-                self.do_send_abort_invocation_to_invoker(invocation_id, InvocationEpoch::MAX);
+                self.do_send_abort_invocation_to_invoker(invocation_id);
                 self.reply_to_kill(response_sink, KillInvocationResponse::NotFound);
             }
         };
@@ -1686,7 +1671,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                 // This can happen because the invoke/resume and the abort invoker messages end up in different queues,
                 // and the abort message can overtake the invoke/resume.
                 // Consequently the invoker might have not received the abort and the user tried to send it again.
-                self.do_send_abort_invocation_to_invoker(invocation_id, InvocationEpoch::MAX);
+                self.do_send_abort_invocation_to_invoker(invocation_id);
                 self.reply_to_cancel(response_sink, CancelInvocationResponse::NotFound);
             }
         };
@@ -1947,7 +1932,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             Some(ResponseResult::Failure(KILLED_INVOCATION_ERROR)),
         )
         .await?;
-        self.do_send_abort_invocation_to_invoker(invocation_id, InvocationEpoch::MAX);
+        self.do_send_abort_invocation_to_invoker(invocation_id);
         Ok(())
     }
 
@@ -1983,7 +1968,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             Some(ResponseResult::Failure(KILLED_INVOCATION_ERROR)),
         )
         .await?;
-        self.do_send_abort_invocation_to_invoker(invocation_id, InvocationEpoch::MAX);
+        self.do_send_abort_invocation_to_invoker(invocation_id);
         Ok(())
     }
 
@@ -2122,13 +2107,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                             ProtobufRawEntryCodec::deserialize(EntryType::Sleep, entry)?
                     );
 
-                    let (timer_key, _) = Timer::complete_journal_entry(
-                        wake_up_time,
-                        invocation_id,
-                        journal_index,
-                        // Journal v3 doesn't support invocation epoch
-                        0,
-                    );
+                    let (timer_key, _) =
+                        Timer::complete_journal_entry(wake_up_time, invocation_id, journal_index);
 
                     self.do_delete_timer(timer_key).await?;
                 }
@@ -2215,13 +2195,12 @@ impl<S> StateMachineApplyContext<'_, S> {
         self.do_delete_timer(key).await?;
 
         match value {
-            Timer::CompleteJournalEntry(invocation_id, entry_index, invocation_epoch) => {
+            Timer::CompleteJournalEntry(invocation_id, entry_index) => {
                 let status = self.get_invocation_status(&invocation_id).await?;
                 if should_use_journal_table_v2(&status) {
                     // We just apply the journal entry
                     lifecycle::OnNotifySleepCompletionCommand {
                         invocation_id,
-                        invocation_epoch,
                         status,
                         completion_id: entry_index,
                     }
@@ -2378,20 +2357,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             trace!(
                 "Received invoker effect for invocation not in invoked status. Ignoring the effect."
             );
-            self.do_send_abort_invocation_to_invoker(effect.invocation_id, effect.invocation_epoch);
-            return Ok(());
-        }
-
-        let current_invocation_epoch = invocation_status
-            .get_invocation_metadata()
-            .expect("Should be present because it's invoked")
-            .current_invocation_epoch;
-        if current_invocation_epoch != effect.invocation_epoch {
-            trace!(
-                "Received invoker effect for invocation with different epoch. Current epoch {} != Invoker effect epoch {}. Ignoring the effect.",
-                current_invocation_epoch, effect.invocation_epoch
-            );
-            self.do_send_abort_invocation_to_invoker(effect.invocation_id, effect.invocation_epoch);
+            self.do_send_abort_invocation_to_invoker(effect.invocation_id);
             return Ok(());
         }
 
@@ -2424,7 +2390,6 @@ impl<S> StateMachineApplyContext<'_, S> {
 
                 self.on_journal_entry(
                     effect.invocation_id,
-                    effect.invocation_epoch,
                     invocation_status,
                     command_index_to_ack,
                     raw_entry,
@@ -2437,7 +2402,6 @@ impl<S> StateMachineApplyContext<'_, S> {
             } => {
                 self.on_journal_entry(
                     effect.invocation_id,
-                    effect.invocation_epoch,
                     invocation_status,
                     command_index_to_ack,
                     raw_entry,
@@ -2543,7 +2507,6 @@ impl<S> StateMachineApplyContext<'_, S> {
     async fn on_journal_entry(
         &mut self,
         invocation_id: InvocationId,
-        invocation_epoch: InvocationEpoch,
         invocation_status: InvocationStatus,
         command_index_to_ack: Option<CommandIndex>,
         raw_entry: RawEntry,
@@ -2572,7 +2535,6 @@ impl<S> StateMachineApplyContext<'_, S> {
         if let Some(command_index_to_ack) = command_index_to_ack {
             self.action_collector.push(Action::AckStoredCommand {
                 invocation_id,
-                invocation_epoch,
                 command_index: command_index_to_ack,
             });
         }
@@ -3279,7 +3241,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                                 v.push(JournalCompletionTarget::from_parts(
                                     invocation_id,
                                     entry_index,
-                                    invocation_metadata.current_invocation_epoch,
                                 ));
                                 self.do_put_promise(
                                     service_id,
@@ -3298,7 +3259,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                                             JournalCompletionTarget::from_parts(
                                                 invocation_id,
                                                 entry_index,
-                                                invocation_metadata.current_invocation_epoch,
                                             ),
                                         ]),
                                     },
@@ -3464,8 +3424,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                         MillisSinceEpoch::new(wake_up_time),
                         invocation_id,
                         entry_index,
-                        // Journal v3 doesn't support invocation_epoch
-                        0,
                     ),
                     invocation_metadata.journal_metadata.span_context.clone(),
                 )?;
@@ -3496,8 +3454,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                         response_sink: Some(ServiceInvocationResponseSink::partition_processor(
                             invocation_id,
                             entry_index,
-                            // Journal v3 doesn't support invocation_epoch
-                            0,
                         )),
                         span_context: span_context.clone(),
                         headers: request.headers,
@@ -3739,8 +3695,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                                 response_sink: ServiceInvocationResponseSink::partition_processor(
                                     invocation_id,
                                     entry_index,
-                                    // Journal v3 doesn't support invocation_epoch
-                                    0,
                                 ),
                             },
                         ))?;
@@ -3768,8 +3722,6 @@ impl<S> StateMachineApplyContext<'_, S> {
                                 response_sink: ServiceInvocationResponseSink::partition_processor(
                                     invocation_id,
                                     entry_index,
-                                    // Journal v3 doesn't support invocation_epoch
-                                    0,
                                 ),
                             },
                         ))?;
@@ -3788,8 +3740,6 @@ impl<S> StateMachineApplyContext<'_, S> {
         // In the old journal world, command_index == entry_index
         self.action_collector.push(Action::AckStoredCommand {
             invocation_id,
-            // Journal v3 doesn't support invocation_epoch
-            invocation_epoch: 0,
             command_index: entry_index,
         });
 
@@ -4400,8 +4350,6 @@ impl<S> StateMachineApplyContext<'_, S> {
             "Effect: Resume service"
         );
 
-        let current_invocation_epoch = metadata.current_invocation_epoch;
-
         metadata.timestamps.update(self.record_created_at);
 
         if Configuration::pinned().common.experimental_enable_vqueues {
@@ -4424,7 +4372,6 @@ impl<S> StateMachineApplyContext<'_, S> {
 
             self.action_collector.push(Action::Invoke {
                 invocation_id,
-                invocation_epoch: current_invocation_epoch,
                 invocation_target,
                 invoke_input_journal: InvokeInputJournal::NoCachedJournal,
             });
@@ -5002,17 +4949,11 @@ impl<S> StateMachineApplyContext<'_, S> {
         Ok(())
     }
 
-    fn do_send_abort_invocation_to_invoker(
-        &mut self,
-        invocation_id: InvocationId,
-        invocation_epoch: InvocationEpoch,
-    ) {
+    fn do_send_abort_invocation_to_invoker(&mut self, invocation_id: InvocationId) {
         debug_if_leader!(self.is_leader, restate.invocation.id = %invocation_id, "Send abort command to invoker");
 
-        self.action_collector.push(Action::AbortInvocation {
-            invocation_id,
-            invocation_epoch,
-        });
+        self.action_collector
+            .push(Action::AbortInvocation { invocation_id });
     }
 
     async fn do_mutate_state(&mut self, state_mutation: &ExternalStateMutation) -> Result<(), Error>
@@ -5428,6 +5369,5 @@ fn should_use_journal_table_v2(status: &InvocationStatus) -> bool {
         })
 }
 
-mod invocation_status_ext;
 #[cfg(test)]
 mod tests;
