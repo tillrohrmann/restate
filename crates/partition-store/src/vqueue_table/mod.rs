@@ -157,12 +157,8 @@ impl ScanVQueueTable for PartitionDb {
         const BATCH_SIZE: usize = 1000;
         // read the active vqueues list
         let mut iterator_opts = ReadOptions::default();
-        // NOTE: Cannot use key prefixes because the prefix length doesn't match our start
-        // key.
-        // iterator_opts.set_prefix_same_as_start(true);
         iterator_opts.set_async_io(true);
-        // Do not remove this!
-        iterator_opts.set_total_order_seek(true);
+        iterator_opts.set_auto_prefix_mode(true);
         // this is not the place to be concerned about corruption, we favor speed
         // over safety for this particular use-case.
         iterator_opts.set_verify_checksums(false);

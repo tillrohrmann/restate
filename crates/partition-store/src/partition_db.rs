@@ -553,9 +553,7 @@ impl CfConfigurator for RocksConfigurator<AllDataCf> {
             );
         }
 
-        // Actually, we would love to use CappedPrefixExtractor but unfortunately it's neither exposed
-        // in the C API nor the rust binding. That's okay and we can change it later.
-        cf_options.set_prefix_extractor(rocksdb::SliceTransform::create_fixed_prefix(
+        cf_options.set_prefix_extractor(rocksdb::SliceTransform::create_capped_prefix(
             crate::DB_PREFIX_LENGTH,
         ));
         cf_options.set_memtable_prefix_bloom_ratio(0.2);

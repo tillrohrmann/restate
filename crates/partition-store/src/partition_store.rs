@@ -272,9 +272,14 @@ impl PartitionStore {
 
     fn new_range_iterator_opts(&self, scan_mode: ScanMode, from: Bytes, to: Bytes) -> ReadOptions {
         let mut opts = ReadOptions::default();
-        // todo: use auto_prefix_mode, at the moment, rocksdb doesn't expose this through the C
-        // binding.
-        opts.set_total_order_seek(scan_mode == ScanMode::TotalOrder);
+        match scan_mode {
+            ScanMode::WithinPrefix => {
+                opts.set_total_order_seek(false);
+            }
+            ScanMode::TotalOrder => {
+                opts.set_auto_prefix_mode(true);
+            }
+        }
         opts.set_iterate_range(from..to);
         opts.set_async_io(true);
         opts
@@ -898,9 +903,14 @@ impl PartitionStoreTransaction<'_> {
     ) -> Result<DBIterator<'_>> {
         let table = self.table_handle(table);
         let mut opts = self.read_options();
-        // todo: use auto_prefix_mode, at the moment, rocksdb doesn't expose this through the C
-        // binding.
-        opts.set_total_order_seek(scan_mode == ScanMode::TotalOrder);
+        match scan_mode {
+            ScanMode::WithinPrefix => {
+                opts.set_total_order_seek(false);
+            }
+            ScanMode::TotalOrder => {
+                opts.set_auto_prefix_mode(true);
+            }
+        }
         opts.set_iterate_range(from.clone()..to);
 
         let it = self

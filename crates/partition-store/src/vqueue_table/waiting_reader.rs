@@ -31,8 +31,7 @@ impl VQueueWaitingReader {
         // over safety for this particular use-case.
         readopts.set_verify_checksums(false);
         readopts.set_tailing(true);
-        // Do not remove this!
-        readopts.set_total_order_seek(true);
+        readopts.set_auto_prefix_mode(true);
 
         // we know how big the prefix is
         let mut key_buf = [0u8; InboxKey::by_stage_prefix_len()];
