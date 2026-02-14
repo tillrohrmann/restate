@@ -10,7 +10,7 @@
 
 use rocksdb::{BlockBasedOptions, Cache, WriteBufferManager};
 
-use restate_types::config::{RocksDbLogLevel, RocksDbOptions, StatisticsLevel};
+use restate_types::config::{BloomFilterType, RocksDbLogLevel, RocksDbOptions, StatisticsLevel};
 
 use crate::logging::LoggingEventListener;
 use crate::{DbName, RocksAccess};
@@ -109,7 +109,12 @@ pub fn create_default_block_options(
     // bloom filters and block cache.
     //
     let mut block_opts = BlockBasedOptions::default();
-    block_opts.set_bloom_filter(10.0, true);
+    match opts.rocksdb_bloom_filter_type() {
+        BloomFilterType::Bloom => block_opts.set_bloom_filter(10.0, true),
+        BloomFilterType::Ribbon => block_opts.set_ribbon_filter(10.0),
+        // bloom_before_level=1: Bloom for L0, Ribbon for L1+
+        BloomFilterType::HybridRibbon => block_opts.set_hybrid_ribbon_filter(10.0, 1),
+    }
     // use the latest Rocksdb table format.
     // https://github.com/facebook/rocksdb/blob/56359da69132d769e97f0a7cc89681d3500e166d/include/rocksdb/table.h#L571
     block_opts.set_format_version(6);

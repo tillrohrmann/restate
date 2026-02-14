@@ -128,6 +128,38 @@ pub struct RocksDbOptions {
     #[serde_as(as = "Option<NonZeroByteCount>")]
     #[cfg_attr(feature = "schemars", schemars(with = "Option<NonZeroByteCount>"))]
     rocksdb_block_size: Option<NonZeroUsize>,
+
+    /// # RocksDB bloom filter type
+    ///
+    /// Controls the type of bloom filter used in SST files.
+    ///
+    /// - `bloom`: Standard full bloom filter (default). Uses ~10 bits per key.
+    /// - `ribbon`: Pure ribbon filter. Uses ~30% less space than bloom at the cost
+    ///   of higher CPU during compaction. Uses ribbon for all levels.
+    /// - `hybrid-ribbon`: Uses bloom filters for L0 (flush output) and ribbon filters
+    ///   for compaction output (L1+). This is the RocksDB-recommended approach for
+    ///   long-lived data, saving ~30% filter memory in lower levels with minimal
+    ///   CPU overhead since L0 data is short-lived and still uses fast bloom filters.
+    ///
+    /// Default: bloom
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rocksdb_bloom_filter_type: Option<BloomFilterType>,
+}
+
+/// Type of bloom filter to use in SST files.
+#[cfg_attr(feature = "clap", derive(clap::ValueEnum))]
+#[derive(Debug, Clone, Copy, Hash, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(rename_all = "kebab-case")]
+pub enum BloomFilterType {
+    /// Standard full bloom filter. Uses ~10 bits per key.
+    #[default]
+    Bloom,
+    /// Pure ribbon filter for all levels. ~30% space savings over bloom.
+    Ribbon,
+    /// Hybrid: bloom for L0 (flush), ribbon for L1+ (compaction output).
+    /// Recommended for workloads with long-lived data.
+    HybridRibbon,
 }
 
 /// Verbosity of the LOG.
@@ -193,6 +225,9 @@ impl RocksDbOptions {
         if self.rocksdb_block_size.is_none() {
             self.rocksdb_block_size = Some(common.rocksdb_block_size());
         }
+        if self.rocksdb_bloom_filter_type.is_none() {
+            self.rocksdb_bloom_filter_type = Some(common.rocksdb_bloom_filter_type());
+        }
     }
 
     pub fn rocksdb_disable_wal(&self) -> bool {
@@ -257,6 +292,10 @@ impl RocksDbOptions {
     pub fn rocksdb_block_size(&self) -> NonZeroUsize {
         self.rocksdb_block_size
             .unwrap_or(NonZeroUsize::new(64 * 1024).unwrap())
+    }
+
+    pub fn rocksdb_bloom_filter_type(&self) -> BloomFilterType {
+        self.rocksdb_bloom_filter_type.unwrap_or_default()
     }
 }
 
