@@ -141,7 +141,7 @@ pub struct RocksDbOptions {
     ///   long-lived data, saving ~30% filter memory in lower levels with minimal
     ///   CPU overhead since L0 data is short-lived and still uses fast bloom filters.
     ///
-    /// Default: bloom
+    /// Default: hybrid-ribbon
     #[serde(skip_serializing_if = "Option::is_none")]
     rocksdb_bloom_filter_type: Option<BloomFilterType>,
 }
@@ -153,12 +153,12 @@ pub struct RocksDbOptions {
 #[serde(rename_all = "kebab-case")]
 pub enum BloomFilterType {
     /// Standard full bloom filter. Uses ~10 bits per key.
-    #[default]
     Bloom,
     /// Pure ribbon filter for all levels. ~30% space savings over bloom.
     Ribbon,
     /// Hybrid: bloom for L0 (flush), ribbon for L1+ (compaction output).
     /// Recommended for workloads with long-lived data.
+    #[default]
     HybridRibbon,
 }
 
