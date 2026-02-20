@@ -418,6 +418,16 @@ where
             >,
         >,
     ) {
+        // If the queue has work waiting but no slots are available, try to evict
+        // older invocations to make room. This triggers graceful suspension of some
+        // in-flight invocations, which will eventually free slots.
+        if !self.quota.is_slot_available()
+            && self.quota.is_evictable()
+            && !segmented_input_queue.inner().is_empty()
+        {
+            self.handle_eviction(options);
+        }
+
         tokio::select! {
             Some(cmd) = self.status_rx.recv() => {
                 let keys = cmd.payload();
@@ -685,6 +695,42 @@ where
                 "No registered partition {partition:?} was found for the invocation {invocation_id}"
             );
         }
+    }
+
+    /// When the concurrency limit is hit and there are queued invocations waiting,
+    /// evict some older in-flight invocations by requesting graceful suspension.
+    #[instrument(level = "trace", skip_all)]
+    fn handle_eviction(&mut self, options: &InvokerOptions) {
+        let Some(concurrency_limit) = options.concurrent_invocations_limit() else {
+            return;
+        };
+        let limit = concurrency_limit.get();
+
+        // Evict up to ~10% of capacity, scanning at most ~20% of invocations
+        let how_many_to_evict = limit.div_ceil(10).max(1);
+        let max_iterations = limit.div_ceil(5).max(1);
+
+        let mut evicted_count = 0;
+        for (id, ism) in self
+            .invocation_state_machine_manager
+            .invocations_from_older_to_newer()
+            .take(max_iterations)
+        {
+            if ism.suspend_for_eviction() {
+                trace!(
+                    restate.invocation.id = %id,
+                    "Evicting invocation to make room for queued work",
+                );
+                evicted_count += 1;
+            }
+            if evicted_count >= how_many_to_evict {
+                break;
+            }
+        }
+
+        // Even if we didn't evict enough, still record the target count so we
+        // don't re-enter eviction until these drain.
+        self.quota.evict(how_many_to_evict);
     }
 
     #[instrument(
@@ -2906,5 +2952,95 @@ mod tests {
                 })
             })
         );
+    }
+
+    #[test(restate_core::test)]
+    async fn eviction_suspends_oldest_and_frees_slots() {
+        const CONCURRENCY_LIMIT: usize = 2;
+        let invoker_options = InvokerOptionsBuilder::default()
+            .inactivity_timeout(FriendlyDuration::ZERO)
+            .abort_timeout(FriendlyDuration::ZERO)
+            .concurrent_invocations_limit(Some(NonZeroUsize::new(CONCURRENCY_LIMIT).unwrap()))
+            .build()
+            .unwrap();
+
+        let invocation_id_1 = InvocationId::mock_random();
+        let invocation_id_2 = InvocationId::mock_random();
+        let invocation_id_3 = InvocationId::mock_random();
+
+        let (_, _status_tx, mut service_inner) = ServiceInner::mock(
+            (),
+            MockSchemas::default(),
+            Some(NonZeroUsize::new(CONCURRENCY_LIMIT).unwrap()),
+        );
+        let _effects_rx = service_inner.register_mock_partition(EmptyStorageReader);
+
+        // Start the first two invocations, filling the quota.
+        for invocation_id in [invocation_id_1, invocation_id_2] {
+            service_inner.handle_invoke(
+                &invoker_options,
+                MOCK_PARTITION,
+                invocation_id,
+                InvocationTarget::mock_virtual_object(),
+                InvokeInputJournal::NoCachedJournal,
+            );
+        }
+
+        // Quota should be full, and evictable (no pending evictions)
+        assert!(!service_inner.quota.is_slot_available());
+        assert!(service_inner.quota.is_evictable());
+
+        // Trigger eviction
+        service_inner.handle_eviction(&invoker_options);
+
+        // The oldest invocation (invocation_id_1) should have its notifications_tx closed
+        assert!(
+            service_inner
+                .invocation_state_machine_manager
+                .resolve_invocation(MOCK_PARTITION, &invocation_id_1)
+                .unwrap()
+                .1
+                .in_flight_with_notifications_tx_closed()
+        );
+
+        // The newer invocation (invocation_id_2) should be untouched
+        assert!(
+            service_inner
+                .invocation_state_machine_manager
+                .resolve_invocation(MOCK_PARTITION, &invocation_id_2)
+                .unwrap()
+                .1
+                .in_flight_with_notifications_tx_open()
+        );
+
+        // Not evictable any more (pending evictions > 0), and no slots yet
+        assert!(!service_inner.quota.is_evictable());
+        assert!(!service_inner.quota.is_slot_available());
+
+        // Simulate the evicted invocation completing its suspension
+        service_inner
+            .handle_invocation_task_suspended_v2(
+                MOCK_PARTITION,
+                invocation_id_1,
+                HashSet::from([NotificationId::CompletionId(17)]),
+            )
+            .await;
+
+        // Now a slot is available and we're no longer evictable
+        assert!(service_inner.quota.is_slot_available());
+        assert!(!service_inner.quota.is_evictable());
+
+        // Start invocation_id_3 — should succeed now
+        service_inner.handle_invoke(
+            &invoker_options,
+            MOCK_PARTITION,
+            invocation_id_3,
+            InvocationTarget::mock_virtual_object(),
+            InvokeInputJournal::NoCachedJournal,
+        );
+
+        // Quota full again, evictable since pending_evictions drained
+        assert!(!service_inner.quota.is_slot_available());
+        assert!(service_inner.quota.is_evictable());
     }
 }

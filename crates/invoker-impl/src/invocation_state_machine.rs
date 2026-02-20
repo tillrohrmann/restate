@@ -547,6 +547,21 @@ impl<K: TimerKey> InvocationStateMachine<K> {
         true
     }
 
+    /// Close the notifications channel to trigger graceful suspension for eviction purposes.
+    /// Returns true if the channel was open and is now closed (i.e., suspension was triggered).
+    /// Unlike `notify_pause()`, this does NOT set `requested_pause`, so the invocation
+    /// will be re-invoked after suspension rather than staying paused.
+    pub(super) fn suspend_for_eviction(&mut self) -> bool {
+        if let AttemptState::InFlight {
+            notifications_tx, ..
+        } = &mut self.invocation_state
+        {
+            // Close notifications_tx to trigger suspension
+            return notifications_tx.take().is_some_and(|tx| !tx.is_closed());
+        }
+        false
+    }
+
     pub(crate) fn should_emit_transient_error_event(
         &mut self,
         new_error_event: &TransientErrorEvent,
@@ -591,6 +606,29 @@ impl fmt::Display for AttemptDeploymentId {
             Some(dp) => fmt::Display::fmt(&dp, f),
             None => write!(f, "unknown"),
         }
+    }
+}
+
+#[cfg(test)]
+impl InvocationStateMachine {
+    pub(crate) fn in_flight_with_notifications_tx_closed(&self) -> bool {
+        matches!(
+            self.invocation_state,
+            AttemptState::InFlight {
+                notifications_tx: None,
+                ..
+            }
+        )
+    }
+
+    pub(crate) fn in_flight_with_notifications_tx_open(&self) -> bool {
+        matches!(
+            &self.invocation_state,
+            AttemptState::InFlight {
+                notifications_tx: Some(_),
+                ..
+            }
+        )
     }
 }
 

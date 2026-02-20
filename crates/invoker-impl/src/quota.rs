@@ -20,7 +20,12 @@ use crate::{
 #[derive(Debug)]
 enum InvokerConcurrencyQuotaInner {
     Unlimited,
-    Limited { available_slots: usize },
+    Limited {
+        available_slots: usize,
+        /// Number of invocations currently being evicted (suspended to free slots).
+        /// This prevents double-eviction while a batch is still draining.
+        pending_evictions: usize,
+    },
 }
 
 #[derive(Debug)]
@@ -40,6 +45,7 @@ impl InvokerConcurrencyQuota {
                     .set(available_slots.get() as f64);
                 InvokerConcurrencyQuotaInner::Limited {
                     available_slots: available_slots.get(),
+                    pending_evictions: 0,
                 }
             }
             None => {
@@ -57,15 +63,43 @@ impl InvokerConcurrencyQuota {
     pub(super) fn is_slot_available(&self) -> bool {
         match &self.inner {
             InvokerConcurrencyQuotaInner::Unlimited => true,
-            InvokerConcurrencyQuotaInner::Limited { available_slots } => *available_slots > 0,
+            InvokerConcurrencyQuotaInner::Limited {
+                available_slots, ..
+            } => *available_slots > 0,
+        }
+    }
+
+    /// Returns true if we can trigger an eviction cycle: limited quota, no available slots,
+    /// and no evictions already pending.
+    pub(super) fn is_evictable(&self) -> bool {
+        matches!(
+            &self.inner,
+            InvokerConcurrencyQuotaInner::Limited {
+                available_slots: 0,
+                pending_evictions: 0,
+            }
+        )
+    }
+
+    /// Record that `count` invocations are being evicted (suspension requested).
+    pub(super) fn evict(&mut self, count: usize) {
+        if let InvokerConcurrencyQuotaInner::Limited {
+            pending_evictions, ..
+        } = &mut self.inner
+        {
+            *pending_evictions += count;
         }
     }
 
     pub(super) fn unreserve_slot(&mut self) {
         match &mut self.inner {
             InvokerConcurrencyQuotaInner::Unlimited => {}
-            InvokerConcurrencyQuotaInner::Limited { available_slots } => {
+            InvokerConcurrencyQuotaInner::Limited {
+                available_slots,
+                pending_evictions,
+            } => {
                 *available_slots += 1;
+                *pending_evictions = pending_evictions.saturating_sub(1);
                 gauge!(
                     INVOKER_AVAILABLE_SLOTS,
                     "invoker_id" =>
@@ -80,7 +114,9 @@ impl InvokerConcurrencyQuota {
         assert!(self.is_slot_available());
         match &mut self.inner {
             InvokerConcurrencyQuotaInner::Unlimited => {}
-            InvokerConcurrencyQuotaInner::Limited { available_slots } => {
+            InvokerConcurrencyQuotaInner::Limited {
+                available_slots, ..
+            } => {
                 *available_slots -= 1;
                 gauge!(
                     INVOKER_AVAILABLE_SLOTS,
@@ -96,7 +132,9 @@ impl InvokerConcurrencyQuota {
     pub(super) fn available_slots(&self) -> usize {
         match self.inner {
             InvokerConcurrencyQuotaInner::Unlimited => usize::MAX,
-            InvokerConcurrencyQuotaInner::Limited { available_slots } => available_slots,
+            InvokerConcurrencyQuotaInner::Limited {
+                available_slots, ..
+            } => available_slots,
         }
     }
 }

@@ -8,12 +8,15 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use super::*;
 use std::ops::RangeInclusive;
+
+use indexmap::IndexMap;
 
 use restate_invoker_api::Effect;
 use restate_invoker_api::invocation_reader::InvocationReader;
 use restate_types::identifiers::PartitionKey;
+
+use super::*;
 
 /// Tree of [InvocationStateMachine] held by the [Service].
 #[derive(Debug)]
@@ -32,7 +35,7 @@ impl<SR> Default for InvocationStateMachineManager<SR> {
 #[derive(Debug)]
 struct PartitionInvocationStateMachineCoordinator<IR> {
     output_tx: mpsc::Sender<Box<Effect>>,
-    invocation_state_machines: HashMap<InvocationId, InvocationStateMachine>,
+    invocation_state_machines: IndexMap<InvocationId, InvocationStateMachine>,
     partition_key_range: RangeInclusive<PartitionKey>,
     storage_reader: IR,
 }
@@ -96,7 +99,7 @@ where
     ) -> Option<(&mpsc::Sender<Box<Effect>>, &IR, InvocationStateMachine)> {
         self.resolve_partition(partition).and_then(|p| {
             p.invocation_state_machines
-                .remove(invocation_id)
+                .shift_remove(invocation_id)
                 .map(|ism| (&p.output_tx, &p.storage_reader, ism))
         })
     }
@@ -105,7 +108,7 @@ where
     pub(super) fn remove_partition(
         &mut self,
         partition: PartitionLeaderEpoch,
-    ) -> Option<HashMap<InvocationId, InvocationStateMachine>> {
+    ) -> Option<IndexMap<InvocationId, InvocationStateMachine>> {
         self.partitions
             .remove(&partition)
             .map(|p| p.invocation_state_machines)
@@ -164,6 +167,15 @@ where
                     None
                 }
             })
+    }
+
+    /// Iterates invocations across all partitions from oldest to newest (insertion order).
+    pub(super) fn invocations_from_older_to_newer(
+        &mut self,
+    ) -> impl Iterator<Item = (&InvocationId, &mut InvocationStateMachine)> {
+        self.partitions
+            .values_mut()
+            .flat_map(|p| p.invocation_state_machines.iter_mut())
     }
 
     #[inline]
