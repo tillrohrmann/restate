@@ -204,6 +204,7 @@ impl ResourceManager {
         wake_up
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn poll_acquire_permit(
         &mut self,
         cx: &mut std::task::Context<'_>,
@@ -211,6 +212,7 @@ impl ResourceManager {
         meta: &VQueueMetaLite,
         key: &EntryKey,
         _metadata: &EntryMetadata,
+        memory_hint: Option<NonZeroByteCount>,
         current_permit: &mut PermitBuilder,
     ) -> AcquireOutcome {
         if !current_permit.has_user_permit() {
@@ -302,6 +304,17 @@ impl ResourceManager {
                     };
                     current_permit.set_throttling_permit(throttling_token);
                 }
+
+                // Finally reserve invoker memory. The hint (if any) was reported by the
+                // invoker on a previous yield; we reserve the larger of hint and floor.
+                if !current_permit.has_memory_lease() {
+                    let size = self.invoker_memory.reservation_size(memory_hint);
+                    let Some(memory_lease) = self.invoker_memory.poll_reserve(cx, vqueue, size)
+                    else {
+                        return AcquireOutcome::BlockedOn(ResourceKind::InvokerMemory);
+                    };
+                    current_permit.set_memory_lease(memory_lease);
+                }
             }
             EntryKind::StateMutation => {
                 // I don't need a system permit here.
@@ -345,6 +358,13 @@ impl ResourceManager {
             // still valid.
             tracing::trace!(
                 "waking up vqueue {queue:?} because invoker concurrency permit was acquired"
+            );
+            eligible.wake_up_queue(queue);
+        }
+
+        while let Poll::Ready(Some(queue)) = self.invoker_memory.poll_head(cx) {
+            tracing::trace!(
+                "waking up vqueue {queue:?} because invoker memory was reserved for it"
             );
             eligible.wake_up_queue(queue);
         }

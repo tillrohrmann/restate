@@ -5295,6 +5295,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                 );
             }
             Stage::Suspended | Stage::Paused => {
+                // The memory hint (if any) is intentionally dropped: wake_up does not
+                // consult the vqueue scheduler's memory reservation path.
                 vqueue.wake_up(now, &header, None, None);
             }
             Stage::Inbox => {

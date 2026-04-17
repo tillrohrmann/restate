@@ -49,12 +49,20 @@ impl PermitBuilder {
         self.system_permit.throttling_permit.is_some()
     }
 
+    pub fn has_memory_lease(&self) -> bool {
+        !self.system_permit.memory_lease.is_empty()
+    }
+
     pub fn set_invoker_permit(&mut self, invoker_permit: Permit) {
         self.system_permit.invoker_permit = invoker_permit;
     }
 
     pub fn set_throttling_permit(&mut self, throttling_permit: ThrottlingToken) {
         self.system_permit.throttling_permit = Some(throttling_permit);
+    }
+
+    pub fn set_memory_lease(&mut self, memory_lease: MemoryLease) {
+        self.system_permit.memory_lease = memory_lease;
     }
 
     pub(crate) fn take(&mut self) -> PermitBuilder {

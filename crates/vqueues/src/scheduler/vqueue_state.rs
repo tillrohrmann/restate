@@ -326,7 +326,6 @@ impl<S: VQueueStore> VQueueState<S> {
         self.memory_hints.insert(*key, needed_memory);
     }
 
-    #[allow(dead_code)]
     pub fn memory_hint(&self, key: &EntryKey) -> Option<NonZeroByteCount> {
         self.memory_hints.get(key).copied()
     }
@@ -367,12 +366,14 @@ impl<S: VQueueStore> VQueueState<S> {
             return Ok(Pop::Yield(action));
         }
 
+        let memory_hint = self.memory_hint(inbox_head_key);
         match resources.poll_acquire_permit(
             cx,
             self.handle,
             &self.meta,
             inbox_head_key,
             &inbox_head_value.metadata,
+            memory_hint,
             &mut self.current_permit,
         ) {
             AcquireOutcome::Acquired(resources) => {
@@ -393,6 +394,9 @@ impl<S: VQueueStore> VQueueState<S> {
                 match resource {
                     ResourceKind::InvokerConcurrency => {
                         self.head_stats.record_invoker_concurrency_delay(true);
+                    }
+                    ResourceKind::InvokerMemory => {
+                        self.head_stats.record_invoker_memory_delay(true);
                     }
                     ResourceKind::InvokerThrottling => {
                         // self.head_stats.record_start_throttling_delay(delay);

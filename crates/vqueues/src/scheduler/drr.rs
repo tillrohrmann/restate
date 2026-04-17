@@ -1065,4 +1065,70 @@ mod tests {
             None,
         );
     }
+
+    #[restate_core::test]
+    async fn test_invoker_memory_gates_inbox_to_running() {
+        let mut rocksdb = storage_test_environment().await;
+        let mut cache = VQueuesMetaCache::new_empty();
+        let qid1 = test_qid(40_000);
+        let qid2 = test_qid(40_001);
+
+        let mut txn = rocksdb.transaction();
+        enqueue_entry(&mut txn, &mut cache, &qid1, 1, 0, None).await;
+        enqueue_entry(&mut txn, &mut cache, &qid2, 2, 0, None).await;
+        txn.commit().await.expect("commit should succeed");
+
+        // Pool fits exactly one invocation's worth of initial memory; the second
+        // must block until the first returns its lease.
+        let reservation = NonZeroByteCount::new(NonZeroUsize::new(64).unwrap());
+        let pool = MemoryPool::with_capacity(reservation);
+        let resource_manager = ResourceManager::create(
+            rocksdb.partition_db().clone(),
+            Concurrency::new_unlimited(),
+            None,
+            pool,
+            reservation,
+        )
+        .await
+        .expect("resource manager should create");
+
+        let db = rocksdb.partition_db();
+        let mut scheduler = DRRScheduler::new(
+            NonZeroU16::new(100).unwrap(),
+            NonZeroU16::new(100).unwrap(),
+            resource_manager,
+            db.clone(),
+            cache.view(),
+        );
+
+        // First poll: exactly one queue runs, the other is blocked on memory.
+        let Poll::Ready(Ok(decision)) = poll_scheduler(pin!(&mut scheduler)) else {
+            panic!("expected decision");
+        };
+        assert_eq!(decision.num_run(), 1);
+        let winner_key = run_keys(&decision)[0];
+        let winner_qid = decision.qids.keys().next().unwrap().clone();
+        let loser_qid = if winner_qid == qid1 { &qid2 } else { &qid1 };
+
+        assert_eq!(
+            scheduler.get_status(loser_qid).status,
+            SchedulingStatus::BlockedOn(ResourceKind::InvokerMemory),
+        );
+
+        // Draining the winner's reservation releases memory back to the pool.
+        let mut scheduler = pin!(scheduler);
+        let resources = scheduler
+            .as_mut()
+            .confirm_run_attempt(&winner_qid, &winner_key);
+        assert!(resources.is_some());
+        drop(resources);
+
+        // Next poll: the previously-blocked queue now runs.
+        let Poll::Ready(Ok(decision)) = poll_scheduler(scheduler.as_mut()) else {
+            panic!("expected decision after memory release");
+        };
+        assert_eq!(decision.num_run(), 1);
+        let next_key = run_keys(&decision)[0];
+        assert_ne!(next_key, winner_key);
+    }
 }
