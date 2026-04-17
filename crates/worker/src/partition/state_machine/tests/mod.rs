@@ -1284,5 +1284,17 @@ async fn yield_effect_resumes_invocation() {
         )
     );
 
+    // A Yield with an unknown reason must follow the same default re-schedule strategy.
+    let actions = test_env
+        .apply(Command::InvokerEffect(Box::new(Effect {
+            invocation_id,
+            kind: EffectKind::Yield(restate_invoker_api::YieldReason::Unknown),
+        })))
+        .await;
+    assert_that!(
+        actions,
+        contains(matchers::actions::invoke_for_id(invocation_id))
+    );
+
     test_env.shutdown().await;
 }

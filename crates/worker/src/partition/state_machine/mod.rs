@@ -514,6 +514,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                                     // We are assuming it's an invocation because state mutations
                                     // can never be observed in the run stage.
                                     vqueue_table::Status::Yielded,
+                                    None,
                                 );
                             }
                         }
@@ -1717,7 +1718,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     )
                     .await?
                 {
-                    self.do_resume_service( invocation_id, metadata).await?;
+                    self.do_resume_service(invocation_id, metadata, None).await?;
                 }
                 self.reply_to_cancel(response_sink, CancelInvocationResponse::Appended);
             }
@@ -1728,7 +1729,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                     metadata.journal_metadata.length,
                 )
                 .await?;
-                self.do_resume_service(invocation_id, metadata).await?;
+                self.do_resume_service(invocation_id, metadata, None)
+                    .await?;
                 self.reply_to_cancel(response_sink, CancelInvocationResponse::Appended);
             }
             InvocationStatus::Inboxed(inboxed) => {
@@ -2557,7 +2559,7 @@ impl<S> StateMachineApplyContext<'_, S> {
                     }
                 }
                 if any_completed {
-                    self.do_resume_service(effect.invocation_id, invocation_metadata)
+                    self.do_resume_service(effect.invocation_id, invocation_metadata, None)
                         .await?;
                 } else {
                     self.do_suspend_service(
@@ -2612,8 +2614,13 @@ impl<S> StateMachineApplyContext<'_, S> {
                     .into_invocation_metadata()
                     .expect("Must be present if status is invoked");
                 debug_if_leader!(self.is_leader, ?reason, "Effect: Yield invocation");
-                // todo pass memory requirements from the reason to the vqueue scheduler and invoker
-                self.do_resume_service(effect.invocation_id, invocation_metadata)
+                let memory_hint = match reason {
+                    restate_invoker_api::YieldReason::ExhaustedMemoryBudget { needed_memory } => {
+                        Some(*needed_memory)
+                    }
+                    restate_invoker_api::YieldReason::Unknown => None,
+                };
+                self.do_resume_service(effect.invocation_id, invocation_metadata, memory_hint)
                     .await?;
             }
         }
@@ -4084,7 +4091,8 @@ impl<S> StateMachineApplyContext<'_, S> {
                 )
                 .await?
                 {
-            self.do_resume_service(invocation_id, metadata).await?;
+            self.do_resume_service(invocation_id, metadata, None)
+                .await?;
                 }
             }
             _ => {
@@ -4510,10 +4518,15 @@ impl<S> StateMachineApplyContext<'_, S> {
         }
     }
 
+    /// Marks the invocation as `Invoked` and returns it to the vqueue inbox.
+    ///
+    /// `memory_hint` is forwarded to the scheduler when the entry is yielded from the Running
+    /// stage (invoker-driven yield). All other callers pass `None`.
     async fn do_resume_service(
         &mut self,
         invocation_id: InvocationId,
         mut metadata: InFlightInvocationMetadata,
+        memory_hint: Option<restate_memory::NonZeroByteCount>,
     ) -> Result<(), Error>
     where
         S: WriteInvocationStatusTable + WriteVQueueTable + WriteLockTable + ReadVQueueTable,
@@ -4531,7 +4544,7 @@ impl<S> StateMachineApplyContext<'_, S> {
             .map_err(Error::Storage)?;
 
         if Configuration::pinned().common.experimental_enable_vqueues {
-            self.vqueue_move_invocation_to_inbox_stage(&invocation_id)
+            self.vqueue_move_invocation_to_inbox_stage(&invocation_id, memory_hint)
                 .await?;
         } else {
             self.action_collector.push(Action::Invoke {
@@ -5226,13 +5239,19 @@ impl<S> StateMachineApplyContext<'_, S> {
         Ok(vqueue_table::Status::Succeeded)
     }
 
-    /// Moves the given invocation to the inbox and making it eligible for scheduling. Depending on its
-    /// current [`Stage`], it will either yield the invocation from running, wake it up or be a noop
-    /// if the invocation is already in the inbox stage.
+    /// Moves the given invocation to the inbox and makes it eligible for scheduling. Depending on
+    /// the entry's current [`Stage`] it will yield it from running, wake it up from
+    /// suspended/paused, or be a noop if it's already in the inbox. A Running→Inbox transition
+    /// always marks the entry as [`vqueue_table::Status::Yielded`] — the entry is leaving the
+    /// run queue and will be resumed later, which is exactly what `Yielded` denotes.
+    ///
+    /// `memory_hint` is an invoker-reported resource need forwarded to the scheduler; it is only
+    /// meaningful for the Running branch and must be `None` from any other stage.
     // [vqueues only]
     async fn vqueue_move_invocation_to_inbox_stage(
         &mut self,
         invocation_id: &InvocationId,
+        memory_hint: Option<restate_memory::NonZeroByteCount>,
     ) -> Result<(), Error>
     where
         S: WriteVQueueTable + WriteLockTable + ReadVQueueTable,
@@ -5245,7 +5264,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         else {
             // todo resolve once we decided on the actual migration strategy
             panic!(
-                "Trying to wake up invocation {invocation_id} which does not exist as a vqueue entry. Have you forgotten to migrate from the old inbox to vqueues?"
+                "Trying to move invocation {invocation_id} to inbox which does not exist as a vqueue entry. Have you forgotten to migrate from the old inbox to vqueues?"
             );
         };
 
@@ -5258,21 +5277,25 @@ impl<S> StateMachineApplyContext<'_, S> {
             self.is_leader.then_some(self.action_collector),
         )
         .await?
-        .expect("waking up in a non-existent vqueue");
+        .expect("moving invocation to inbox in a non-existent vqueue");
 
         let now = UniqueTimestamp::from_unix_millis_unchecked(self.record_created_at);
 
         // todo: this would be a good place to pick up if the invocation
-        // metadata should be updated (i.e. a deployment was pinned)
+        //  metadata should be updated (i.e. a deployment was pinned)
         match header.stage() {
-            Stage::Suspended => {
-                vqueue.wake_up(now, &header, None, None);
-            }
-            Stage::Paused => {
-                vqueue.wake_up(now, &header, None, None);
-            }
             Stage::Running => {
-                vqueue.yield_entry(now, &header, None, None, header.status());
+                vqueue.yield_entry(
+                    now,
+                    &header,
+                    None,
+                    None,
+                    vqueue_table::Status::Yielded,
+                    memory_hint,
+                );
+            }
+            Stage::Suspended | Stage::Paused => {
+                vqueue.wake_up(now, &header, None, None);
             }
             Stage::Inbox => {
                 // nothing to do if we are already in the inbox

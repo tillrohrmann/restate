@@ -383,6 +383,15 @@ impl<S: VQueueStore> DRRScheduler<S> {
                         self.waker.wake_by_ref();
                     }
                 }
+                EventDetails::EntryMemoryHint { key, needed_memory } => {
+                    let Some(handle) = maybe_handle else {
+                        continue;
+                    };
+                    let Some(qstate) = self.q.get_mut(handle) else {
+                        continue;
+                    };
+                    qstate.note_memory_hint(&key, needed_memory);
+                }
             }
         }
     }
@@ -1008,5 +1017,52 @@ mod tests {
             SchedulingStatus::Dormant
         );
         assert!(matches!(poll_scheduler(scheduler.as_mut()), Poll::Pending));
+    }
+
+    #[restate_core::test]
+    async fn test_entry_memory_hint_is_stored_and_cleared() {
+        let mut rocksdb = storage_test_environment().await;
+        let mut cache = VQueuesMetaCache::new_empty();
+        let qid = test_qid(30_000);
+        let mut events = Vec::new();
+
+        let mut txn = rocksdb.transaction();
+        let key = enqueue_entry(&mut txn, &mut cache, &qid, 1, 0, Some(&mut events)).await;
+        txn.commit().await.expect("commit should succeed");
+
+        let db = rocksdb.partition_db();
+        let mut scheduler = create_scheduler(db, &cache).await;
+        for event in events.drain(..) {
+            scheduler.on_inbox_event(event);
+        }
+
+        let needed = NonZeroByteCount::new(NonZeroUsize::new(64 * 1024).unwrap());
+        let mut hint_event = VQueueEvent::new(qid.clone());
+        hint_event.push(EventDetails::EntryMemoryHint {
+            key,
+            needed_memory: needed,
+        });
+        scheduler.on_inbox_event(hint_event);
+
+        let handle = *scheduler
+            .id_lookup
+            .get(&qid)
+            .expect("scheduler must know the queue after enqueue");
+        assert_eq!(
+            scheduler.q.get(handle).unwrap().memory_hint(&key),
+            Some(needed),
+        );
+
+        // Removing the entry from the inbox should drop the hint as well.
+        let mut removal = VQueueEvent::new(qid);
+        removal.push(EventDetails::InboxUpdate(MetaLiteUpdate::RemovedFromInbox(
+            key,
+        )));
+        scheduler.on_inbox_event(removal);
+
+        assert_eq!(
+            scheduler.q.get(handle).and_then(|q| q.memory_hint(&key)),
+            None,
+        );
     }
 }

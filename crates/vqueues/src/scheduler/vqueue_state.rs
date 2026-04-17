@@ -10,10 +10,12 @@
 
 use std::time::Duration;
 
+use hashbrown::HashMap;
 use metrics::counter;
 use tokio::time::Instant;
 
 use restate_clock::RoughTimestamp;
+use restate_memory::NonZeroByteCount;
 use restate_storage_api::StorageError;
 use restate_storage_api::vqueue_table::{EntryKey, EntryValue, VQueueStore, stats::WaitStats};
 use restate_types::vqueues::VQueueId;
@@ -275,6 +277,10 @@ pub struct VQueueState<S: VQueueStore> {
     head_stats: Stats,
     #[debug(skip)]
     current_permit: PermitBuilder,
+    /// In-memory per-entry memory hints reported by the invoker via `EffectKind::Yield`.
+    /// Entries are evicted together with the underlying inbox entry (see `notify_removed`).
+    #[debug(skip)]
+    memory_hints: HashMap<EntryKey, NonZeroByteCount>,
 }
 
 impl<S: VQueueStore> VQueueState<S> {
@@ -294,6 +300,7 @@ impl<S: VQueueStore> VQueueState<S> {
             queue,
             head_stats: Stats::default(),
             current_permit: Default::default(),
+            memory_hints: HashMap::new(),
         }
     }
 
@@ -311,7 +318,17 @@ impl<S: VQueueStore> VQueueState<S> {
             deficit: 0,
             head_stats: Stats::default(),
             current_permit: Default::default(),
+            memory_hints: HashMap::new(),
         }
+    }
+
+    pub fn note_memory_hint(&mut self, key: &EntryKey, needed_memory: NonZeroByteCount) {
+        self.memory_hints.insert(*key, needed_memory);
+    }
+
+    #[allow(dead_code)]
+    pub fn memory_hint(&self, key: &EntryKey) -> Option<NonZeroByteCount> {
+        self.memory_hints.get(key).copied()
     }
 
     pub fn try_pop(
@@ -429,6 +446,7 @@ impl<S: VQueueStore> VQueueState<S> {
     }
 
     pub fn notify_removed(&mut self, key: &EntryKey) -> Option<PermitBuilder> {
+        self.memory_hints.remove(key);
         if self.queue.remove(key) {
             self.head_stats.reset();
             Some(self.current_permit.take())

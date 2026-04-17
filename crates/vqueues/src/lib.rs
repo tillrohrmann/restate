@@ -26,6 +26,7 @@ pub use util::*;
 use restate_clock::RoughTimestamp;
 use restate_clock::time::MillisSinceEpoch;
 use restate_limiter::LimitKey;
+use restate_memory::NonZeroByteCount;
 use restate_storage_api::lock_table::{LockState, WriteLockTable};
 use restate_storage_api::vqueue_table::metadata::{VQueueLink, VQueueMeta};
 use restate_storage_api::vqueue_table::stats::{EntryStatistics, WaitStats};
@@ -63,6 +64,12 @@ pub enum EventDetails {
     LockReleased {
         scope: Option<Scope>,
         lock_name: LockName,
+    },
+    /// Invoker-reported memory hint tied to a yielded entry. In-memory signal only,
+    /// not persisted; consumed by the scheduler to inform future memory-aware gating.
+    EntryMemoryHint {
+        key: EntryKey,
+        needed_memory: NonZeroByteCount,
     },
 }
 
@@ -660,6 +667,7 @@ where
         run_at: Option<MillisSinceEpoch>,
         updated_metadata: Option<EntryMetadata>,
         new_status: Status,
+        memory_hint: Option<NonZeroByteCount>,
     ) {
         let vqueue_id = header.vqueue_id();
         let meta = self.cache.get_mut(self.cache_key).unwrap();
@@ -756,6 +764,13 @@ where
                 key: modified_key,
                 value,
             }));
+
+            if let Some(needed_memory) = memory_hint {
+                event.push(EventDetails::EntryMemoryHint {
+                    key: modified_key,
+                    needed_memory,
+                });
+            }
 
             collector.push(A::from(event));
         }
