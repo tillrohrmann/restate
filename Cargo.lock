@@ -8459,6 +8459,7 @@ dependencies = [
  "ahash",
  "bilrost",
  "bytes",
+ "bytestring",
  "compact_str",
  "hashbrown 0.16.1",
  "restate-util-string",

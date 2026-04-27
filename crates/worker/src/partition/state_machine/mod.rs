@@ -3416,7 +3416,10 @@ impl<S> StateMachineApplyContext<'_, S> {
                         invocation_metadata.invocation_target.as_keyed_service_id()
                     {
                         // Load state and write completion
-                        let promise_metadata = self.storage.get_promise(&service_id, &key).await?;
+                        let promise_metadata = self
+                            .storage
+                            .get_promise(&service_id, &ReString::from(key.as_ref()))
+                            .await?;
 
                         match promise_metadata {
                             Some(Promise {
@@ -3486,7 +3489,10 @@ impl<S> StateMachineApplyContext<'_, S> {
                         invocation_metadata.invocation_target.as_keyed_service_id()
                     {
                         // Load state and write completion
-                        let promise_metadata = self.storage.get_promise(&service_id, &key).await?;
+                        let promise_metadata = self
+                            .storage
+                            .get_promise(&service_id, &ReString::from(key.as_ref()))
+                            .await?;
 
                         let completion_result = match promise_metadata {
                             Some(Promise {
@@ -3529,7 +3535,10 @@ impl<S> StateMachineApplyContext<'_, S> {
                         invocation_metadata.invocation_target.as_keyed_service_id()
                     {
                         // Load state and write completion
-                        let promise_metadata = self.storage.get_promise(&service_id, &key).await?;
+                        let promise_metadata = self
+                            .storage
+                            .get_promise(&service_id, &ReString::from(key.as_ref()))
+                            .await?;
 
                         let completion_result = match promise_metadata {
                             None => {
@@ -5180,7 +5189,7 @@ impl<S> StateMachineApplyContext<'_, S> {
         debug_if_leader!(self.is_leader, rpc.service = %service_id.service_name, "Effect: Put promise {} in non completed state", key);
 
         self.storage
-            .put_promise(&service_id, &key, &promise)
+            .put_promise(&service_id, &ReString::from(key.as_ref()), &promise)
             .map_err(Error::Storage)
     }
 
@@ -5323,8 +5332,8 @@ impl<S> StateMachineApplyContext<'_, S> {
 
         // synthesize a virtual object invocation target so we can generate the vqueue id from.
         let target = InvocationTarget::VirtualObject {
-            name: service_id.service_name.clone(),
-            key: service_id.key.clone(),
+            name: ByteString::from(service_id.service_name.as_str()),
+            key: ByteString::from(service_id.key.as_str()),
             // fake, doesn't matter.
             handler: ByteString::from_static("_state_mutation"),
             handler_ty: VirtualObjectHandlerType::Exclusive,

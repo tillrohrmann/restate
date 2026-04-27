@@ -539,8 +539,8 @@ mod test_util {
                     }
                     AttachInvocationTarget::Workflow(id) => {
                         attach_invocation_entry_message::Target::WorkflowTarget(WorkflowTarget {
-                            workflow_name: id.service_name.into(),
-                            workflow_key: id.key.into(),
+                            workflow_name: id.service_name.as_str().to_owned(),
+                            workflow_key: id.key.as_str().to_owned(),
                         })
                     }
                 }),
@@ -585,8 +585,8 @@ mod test_util {
                     AttachInvocationTarget::Workflow(id) => {
                         get_invocation_output_entry_message::Target::WorkflowTarget(
                             WorkflowTarget {
-                                workflow_name: id.service_name.into(),
-                                workflow_key: id.key.into(),
+                                workflow_name: id.service_name.as_str().to_owned(),
+                                workflow_key: id.key.as_str().to_owned(),
                             },
                         )
                     }

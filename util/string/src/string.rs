@@ -308,6 +308,14 @@ impl<'a> From<&'a str> for ReString {
     }
 }
 
+#[cfg(feature = "bytestring")]
+impl From<bytestring::ByteString> for ReString {
+    #[inline]
+    fn from(s: bytestring::ByteString) -> Self {
+        Self::from(s.as_ref())
+    }
+}
+
 impl std::fmt::Debug for ReString {
     #[inline]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

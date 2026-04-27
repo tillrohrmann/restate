@@ -8,8 +8,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use bytes::Bytes;
-use bytestring::ByteString;
 use std::sync::Arc;
 
 use crate::keys::{DecodeTableKey, KeyKind, define_table_key};
@@ -34,9 +32,9 @@ define_table_key!(
     KeyKind::Promise,
     PromiseKey(
         partition_key: PartitionKey,
-        service_name: ByteString,
-        service_key: Bytes,
-        key: ByteString
+        service_name: ServiceName,
+        service_key: ReString,
+        key: ReString
     )
 );
 
@@ -53,11 +51,11 @@ define_table_key!(
 );
 
 #[inline]
-fn create_key(service_id: &ServiceId, key: &ByteString) -> PromiseKey {
+fn create_key(service_id: &ServiceId, key: &ReString) -> PromiseKey {
     PromiseKey {
         partition_key: service_id.partition_key(),
         service_name: service_id.service_name.clone(),
-        service_key: service_id.key.as_bytes().clone(),
+        service_key: service_id.key.clone(),
         key: key.clone(),
     }
 }
@@ -65,23 +63,18 @@ fn create_key(service_id: &ServiceId, key: &ByteString) -> PromiseKey {
 fn get_promise<S: StorageAccess>(
     storage: &mut S,
     service_id: &ServiceId,
-    key: &ByteString,
+    key: &ReString,
 ) -> Result<Option<Promise>> {
     let _x = RocksDbPerfGuard::new("get-promise");
     // todo(tillrohrmann) make dependent on migration status once we migrate old promises to the new scoped table
     if service_id.scope.is_some() {
-        // todo(tillrohrmann) remove once ServiceId uses ServiceName and ReString internally
-        let service_name = ServiceName::new(&service_id.service_name);
-        let service_key = ReString::new_owned(&service_id.key);
-        let key = ReString::new_owned(key);
-
         storage.get_value_proto(
             ScopedPromiseKeyRef::builder()
                 .partition_key(&service_id.partition_key())
                 .scope(&service_id.scope)
-                .service_name(&service_name)
-                .service_key(&service_key)
-                .key(&key)
+                .service_name(&service_id.service_name)
+                .service_key(&service_id.key)
+                .key(key)
                 .into_complete()
                 .expect("to be complete"),
         )
@@ -93,23 +86,18 @@ fn get_promise<S: StorageAccess>(
 fn put_promise<S: StorageAccess>(
     storage: &mut S,
     service_id: &ServiceId,
-    key: &ByteString,
+    key: &ReString,
     metadata: &Promise,
 ) -> Result<()> {
     // todo(tillrohrmann) make dependent on migration status once we migrate old promises to the new scoped table
     if service_id.scope.is_some() {
-        // todo(tillrohrmann) remove once ServiceId uses ServiceName and ReString internally
-        let service_name = ServiceName::new(&service_id.service_name);
-        let service_key = ReString::new_owned(&service_id.key);
-        let key = ReString::new_owned(key);
-
         storage.put_kv_proto(
             ScopedPromiseKeyRef::builder()
                 .partition_key(&service_id.partition_key())
                 .scope(&service_id.scope)
-                .service_name(&service_name)
-                .service_key(&service_key)
-                .key(&key)
+                .service_name(&service_id.service_name)
+                .service_key(&service_id.key)
+                .key(key)
                 .into_complete()
                 .expect("to be complete"),
             metadata,
@@ -122,16 +110,13 @@ fn put_promise<S: StorageAccess>(
 fn delete_all_promises<S: StorageAccess>(storage: &mut S, service_id: &ServiceId) -> Result<()> {
     // todo(tillrohrmann) make dependent on migration status once we migrate old promises to the new scoped table
     if service_id.scope.is_some() {
-        // todo(tillrohrmann) remove once ServiceId uses ServiceName and ReString internally
-        let service_name = ServiceName::new(&service_id.service_name);
-        let service_key = ReString::new_owned(&service_id.key);
         let partition_key = service_id.partition_key();
 
         let prefix_key = ScopedPromiseKeyRef::builder()
             .partition_key(&partition_key)
             .scope(&service_id.scope)
-            .service_name(&service_name)
-            .service_key(&service_key);
+            .service_name(&service_id.service_name)
+            .service_key(&service_id.key);
 
         // Right now the WBWI does not support range deletions :-(
         // That's why we need to iterate over the individual promises.
@@ -149,7 +134,7 @@ fn delete_all_promises<S: StorageAccess>(storage: &mut S, service_id: &ServiceId
         let prefix_key = PromiseKeyRef::builder()
             .partition_key(&partition_key)
             .service_name(&service_id.service_name)
-            .service_key(service_id.key.as_bytes());
+            .service_key(&service_id.key);
 
         let keys = storage.for_each_key_value_in_place(
             TableScan::SinglePartitionKeyPrefix(service_id.partition_key(), prefix_key),
@@ -168,7 +153,7 @@ impl ReadPromiseTable for PartitionStore {
     async fn get_promise(
         &mut self,
         service_id: &ServiceId,
-        key: &ByteString,
+        key: &ReString,
     ) -> Result<Option<Promise>> {
         self.assert_partition_key(service_id)?;
         get_promise(self, service_id, key)
@@ -199,13 +184,8 @@ impl ScanPromiseTable for PartitionStore {
                     let key = break_on_err(PromiseKey::deserialize_from(&mut k))?;
                     let metadata = break_on_err(Promise::decode(&mut v))?;
                     let (partition_key, service_name, service_key, promise_key) = key.split();
-                    let service_id = ServiceId::with_partition_key(
-                        partition_key,
-                        service_name,
-                        break_on_err(ByteString::try_from(service_key).map_err(|e| {
-                            StorageError::Generic(anyhow::anyhow!("Cannot convert to string {e}"))
-                        }))?,
-                    );
+                    let service_id =
+                        ServiceId::with_partition_key(partition_key, service_name, service_key);
                     f_unscoped.lock()(OwnedPromiseRow {
                         service_id,
                         key: promise_key,
@@ -227,14 +207,10 @@ impl ScanPromiseTable for PartitionStore {
                     let metadata = break_on_err(Promise::decode(&mut v))?;
                     let (_partition_key, scope, service_name, service_key, promise_key) =
                         key.split();
-                    let service_id = ServiceId::new(
-                        scope,
-                        ByteString::from(service_name.as_str()),
-                        ByteString::from(service_key.as_str()),
-                    );
+                    let service_id = ServiceId::new(scope, service_name, service_key);
                     f_scoped.lock()(OwnedPromiseRow {
                         service_id,
-                        key: ByteString::from(promise_key.as_str()),
+                        key: promise_key,
                         metadata,
                     })
                     .map_break(Ok)
@@ -254,7 +230,7 @@ impl ReadPromiseTable for PartitionStoreTransaction<'_> {
     async fn get_promise(
         &mut self,
         service_id: &ServiceId,
-        key: &ByteString,
+        key: &ReString,
     ) -> Result<Option<Promise>> {
         self.assert_partition_key(service_id)?;
         get_promise(self, service_id, key)
@@ -265,7 +241,7 @@ impl WritePromiseTable for PartitionStoreTransaction<'_> {
     fn put_promise(
         &mut self,
         service_id: &ServiceId,
-        key: &ByteString,
+        key: &ReString,
         promise: &Promise,
     ) -> Result<()> {
         self.assert_partition_key(service_id)?;

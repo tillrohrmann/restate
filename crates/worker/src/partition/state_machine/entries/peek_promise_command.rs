@@ -14,6 +14,7 @@ use restate_storage_api::promise_table::{Promise, PromiseState, ReadPromiseTable
 use restate_types::journal_v2::{
     EntryMetadata, PeekPromiseCommand, PeekPromiseCompletion, PeekPromiseResult,
 };
+use restate_util_string::ReString;
 use tracing::warn;
 
 pub(super) type ApplyPeekPromiseCommand<'e> = ApplyJournalCommandEffect<'e, PeekPromiseCommand>;
@@ -34,7 +35,7 @@ where
                 // Load state and write completion
                 let promise_metadata = ctx
                     .storage
-                    .get_promise(&service_id, &self.entry.key)
+                    .get_promise(&service_id, &ReString::from(self.entry.key.as_ref()))
                     .await?;
                 match promise_metadata {
                     Some(Promise {

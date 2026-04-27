@@ -1394,8 +1394,8 @@ impl InvocationQuery {
             InvocationQuery::Invocation(iid) => *iid,
             InvocationQuery::Workflow(wfid) => InvocationId::generate(
                 &InvocationTarget::Workflow {
-                    name: wfid.service_name.clone(),
-                    key: wfid.key.clone(),
+                    name: ByteString::from(wfid.service_name.as_str()),
+                    key: ByteString::from(wfid.key.as_str()),
                     // Doesn't matter
                     handler: Default::default(),
                     // Must be the workflow handler type
@@ -1804,8 +1804,8 @@ mod mocks {
 
         pub fn mock_from_service_id(service_id: ServiceId) -> Self {
             InvocationTarget::virtual_object(
-                service_id.service_name,
-                service_id.key,
+                ByteString::from(service_id.service_name.as_str()),
+                ByteString::from(service_id.key.as_str()),
                 "MyMethod",
                 VirtualObjectHandlerType::Exclusive,
             )

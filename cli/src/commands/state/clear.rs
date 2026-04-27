@@ -89,8 +89,8 @@ async fn clear(env: &CliEnv, opts: &Clear) -> Result<()> {
         update_state(
             env,
             version,
-            &svc_id.service_name,
-            &svc_id.key,
+            svc_id.service_name.as_str(),
+            svc_id.key.as_str(),
             HashMap::default(),
         )
         .await?;

@@ -23,6 +23,7 @@ use restate_types::journal_v2::{
     CompletePromiseCommand, CompletePromiseCompletion, CompletePromiseResult, CompletePromiseValue,
     EntryMetadata,
 };
+use restate_util_string::ReString;
 use tracing::warn;
 
 pub(super) type ApplyCompletePromiseCommand<'e> =
@@ -45,7 +46,7 @@ where
             // Load state and write completion
             let promise_metadata = ctx
                 .storage
-                .get_promise(&service_id, &self.entry.key)
+                .get_promise(&service_id, &ReString::from(self.entry.key.as_ref()))
                 .await?;
 
             match promise_metadata {
@@ -60,7 +61,7 @@ where
                     ctx.storage
                         .put_promise(
                             &service_id,
-                            &self.entry.key,
+                            &ReString::from(self.entry.key.as_ref()),
                             &Promise {
                                 state: PromiseState::Completed(self.entry.value.clone().into()),
                             },
@@ -99,7 +100,7 @@ where
                     ctx.storage
                         .put_promise(
                             &service_id,
-                            &self.entry.key,
+                            &ReString::from(self.entry.key.as_ref()),
                             &Promise {
                                 state: PromiseState::Completed(self.entry.value.clone().into()),
                             },

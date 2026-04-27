@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use bytes::Bytes;
-use bytestring::ByteString;
 use futures::Stream;
 use futures_util::stream;
 use restate_types::{Scope, ServiceName};
@@ -41,8 +40,8 @@ define_table_key!(
     KeyKind::State,
     StateKey(
         partition_key: PartitionKey,
-        service_name: ByteString,
-        service_key: ByteString,
+        service_name: ServiceName,
+        service_key: ReString,
         state_key: Bytes,
     )
 );
@@ -135,16 +134,13 @@ fn put_user_state<S: StorageAccess>(
 ) -> Result<()> {
     // todo(tillrohrmann) make dependent on migration status once we migrate old state entries to the new scoped table
     if service_id.scope.is_some() {
-        //todo(tillrohrmann) remove once ServiceId carries the right types
-        let service_name = ServiceName::new(service_id.service_name.as_ref());
-        let service_key = ReString::new_owned(&service_id.key);
         let partition_key = service_id.partition_key();
 
         let key = ScopedStateKeyRef::builder()
             .partition_key(&partition_key)
             .scope(&service_id.scope)
-            .service_name(&service_name)
-            .service_key(&service_key)
+            .service_name(&service_id.service_name)
+            .service_key(&service_id.key)
             .state_key(state_key)
             .into_complete()
             .expect("key to be complete");
@@ -163,15 +159,12 @@ fn delete_user_state<S: StorageAccess>(
 ) -> Result<()> {
     // todo(tillrohrmann) make dependent on migration status once we migrate old state entries to the new scoped table
     if service_id.scope.is_some() {
-        //todo(tillrohrmann) remove once ServiceId carries the right types
-        let service_name = ServiceName::new(service_id.service_name.as_ref());
-        let service_key = ReString::new_owned(&service_id.key);
         let partition_key = service_id.partition_key();
 
         let key = ScopedStateKeyRef::builder()
             .partition_key(&partition_key)
-            .service_name(&service_name)
-            .service_key(&service_key)
+            .service_name(&service_id.service_name)
+            .service_key(&service_id.key)
             .state_key(state_key)
             .into_complete()
             .expect("key to be complete");
@@ -186,16 +179,13 @@ fn delete_user_state<S: StorageAccess>(
 fn delete_all_user_state<S: StorageAccess>(storage: &mut S, service_id: &ServiceId) -> Result<()> {
     // todo(tillrohrmann) make dependent on migration status once we migrate old state entries to the new scoped table
     if service_id.scope.is_some() {
-        //todo(tillrohrmann) remove once ServiceId carries the right types
-        let service_name = ServiceName::new(service_id.service_name.as_ref());
-        let service_key = ReString::new_owned(&service_id.key);
         let partition_key = service_id.partition_key();
 
         let prefix_key = ScopedStateKeyRef::builder()
             .partition_key(&partition_key)
             .scope(&service_id.scope)
-            .service_name(&service_name)
-            .service_key(&service_key);
+            .service_name(&service_id.service_name)
+            .service_key(&service_id.key);
 
         // Right now the WBWI does not support range deletions :-(
         // That's why we need to iterate over the individual state entries.
@@ -236,15 +226,12 @@ fn get_user_state<S: StorageAccess>(
     let _x = RocksDbPerfGuard::new("get-user-state");
     // todo(tillrohrmann) make dependent on migration status once we migrate old state entries to the new scoped table
     if service_id.scope.is_some() {
-        //todo(tillrohrmann) remove once ServiceId carries the right types
-        let service_name = ServiceName::new(service_id.service_name.as_ref());
-        let service_key = ReString::new_owned(&service_id.key);
         let partition_key = service_id.partition_key();
 
         let key = ScopedStateKeyRef::builder()
             .partition_key(&partition_key)
-            .service_name(&service_name)
-            .service_key(&service_key)
+            .service_name(&service_id.service_name)
+            .service_key(&service_id.key)
             .state_key(state_key)
             .into_complete()
             .expect("key to be complete");
@@ -264,15 +251,12 @@ fn get_all_user_states_for_service<'a, S: StorageAccess>(
 
     // todo(tillrohrmann) make dependent on migration status once we migrate old state entries to the new scoped table
     if service_id.scope.is_some() {
-        //todo(tillrohrmann) remove once ServiceId carries the right types
-        let service_name = ServiceName::new(service_id.service_name.as_ref());
-        let service_key = ReString::new_owned(&service_id.key);
         let partition_key = service_id.partition_key();
 
         let key = ScopedStateKeyRef::builder()
             .partition_key(&partition_key)
-            .service_name(&service_name)
-            .service_key(&service_key);
+            .service_name(&service_id.service_name)
+            .service_key(&service_id.key);
 
         let iter = storage.iterator_from(TableScan::SinglePartitionKeyPrefix(
             service_id.partition_key(),
@@ -369,11 +353,7 @@ impl ScanStateTable for PartitionStore {
                     let row_key = break_on_err(ScopedStateKey::deserialize_from(&mut key))?;
                     let (_partition_key, scope, service_name, service_key, state_key) =
                         row_key.split();
-                    let service_id = ServiceId::new(
-                        scope,
-                        ByteString::from(service_name.as_str()),
-                        ByteString::from(service_key.as_str()),
-                    );
+                    let service_id = ServiceId::new(scope, service_name, service_key);
                     f_scoped.lock()((service_id, state_key, value)).map_break(Ok)
                 },
             )

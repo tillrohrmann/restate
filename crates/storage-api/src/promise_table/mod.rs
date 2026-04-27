@@ -21,6 +21,7 @@ use restate_types::journal_v2::{
     CompletePromiseValue, Failure, FailureMetadata, GetPromiseResult, PeekPromiseResult,
 };
 use restate_types::sharding::KeyRange;
+use restate_util_string::ReString;
 
 use super::Result;
 use crate::protobuf_types::PartitionStoreProtobufValue;
@@ -117,7 +118,7 @@ impl PartitionStoreProtobufValue for Promise {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OwnedPromiseRow {
     pub service_id: ServiceId,
-    pub key: ByteString,
+    pub key: ReString,
     pub metadata: Promise,
 }
 
@@ -125,7 +126,7 @@ pub trait ReadPromiseTable {
     fn get_promise(
         &mut self,
         service_id: &ServiceId,
-        key: &ByteString,
+        key: &ReString,
     ) -> impl Future<Output = Result<Option<Promise>>> + Send;
 }
 
@@ -143,7 +144,7 @@ pub trait WritePromiseTable {
     fn put_promise(
         &mut self,
         service_id: &ServiceId,
-        key: &ByteString,
+        key: &ReString,
         promise: &Promise,
     ) -> Result<()>;
 

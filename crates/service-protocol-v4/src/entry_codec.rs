@@ -1625,8 +1625,8 @@ impl From<AttachInvocationTarget> for proto::attach_invocation_command_message::
                 })
             }
             AttachInvocationTarget::Workflow(id) => Self::WorkflowTarget(proto::WorkflowTarget {
-                workflow_name: id.service_name.into(),
-                workflow_key: id.key.into(),
+                workflow_name: id.service_name.as_str().to_owned(),
+                workflow_key: id.key.as_str().to_owned(),
             }),
         }
     }
@@ -1674,8 +1674,8 @@ impl From<AttachInvocationTarget> for proto::get_invocation_output_command_messa
                 })
             }
             AttachInvocationTarget::Workflow(id) => Self::WorkflowTarget(proto::WorkflowTarget {
-                workflow_name: id.service_name.into(),
-                workflow_key: id.key.into(),
+                workflow_name: id.service_name.as_str().to_owned(),
+                workflow_key: id.key.as_str().to_owned(),
             }),
         }
     }

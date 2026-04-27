@@ -31,7 +31,8 @@ use sha2::{Digest, Sha256};
 use ulid::Ulid;
 
 use self::partitioned::partitioned_resource_id;
-use crate::Scope;
+use restate_util_string::ReString;
+
 use crate::base62_util::{base62_encode_fixed_width_u128, base62_max_length_for_type};
 use crate::errors::IdDecodeError;
 use crate::id_util::IdResourceType;
@@ -39,6 +40,7 @@ use crate::id_util::{IdDecoder, IdEncoder};
 use crate::invocation::{InvocationTarget, InvocationTargetType, WorkflowHandlerType};
 use crate::journal_v2::SignalId;
 use crate::time::MillisSinceEpoch;
+use crate::{Scope, ServiceName};
 use restate_encoding::{BilrostNewType, NetSerde};
 
 thread_local! {
@@ -360,10 +362,10 @@ pub struct ServiceId {
     // TODO rename this to KeyedServiceId. This type can be used only by keyed service types (virtual objects and workflows)
     /// Identifies the grpc service
     #[bilrost(1)]
-    pub service_name: ByteString,
+    pub service_name: ServiceName,
     /// Identifies the service instance for the given service name
     #[bilrost(2)]
-    pub key: ByteString,
+    pub key: ReString,
 
     #[bilrost(3)]
     partition_key: PartitionKey,
@@ -376,8 +378,8 @@ pub struct ServiceId {
 impl ServiceId {
     pub fn new(
         scope: Option<Scope>,
-        service_name: impl Into<ByteString>,
-        key: impl Into<ByteString>,
+        service_name: impl Into<ServiceName>,
+        key: impl Into<ReString>,
     ) -> Self {
         let key = key.into();
         let partition_key = scope
@@ -397,8 +399,8 @@ impl ServiceId {
     /// or `scope.partition_key()` if scoped.
     pub fn with_partition_key(
         partition_key: PartitionKey,
-        service_name: impl Into<ByteString>,
-        key: impl Into<ByteString>,
+        service_name: impl Into<ServiceName>,
+        key: impl Into<ReString>,
     ) -> Self {
         Self {
             service_name: service_name.into(),
@@ -413,8 +415,8 @@ impl ServiceId {
     /// or `scope.partition_key()` if scoped.
     pub const fn from_parts(
         partition_key: PartitionKey,
-        service_name: ByteString,
-        key: ByteString,
+        service_name: ServiceName,
+        key: ReString,
     ) -> Self {
         Self {
             service_name,
@@ -1363,8 +1365,8 @@ mod mocks {
             service_key: &'static str,
         ) -> Self {
             Self {
-                service_name: ByteString::from_static(service_name),
-                key: ByteString::from_static(service_key),
+                service_name: ServiceName::from_static(service_name),
+                key: ReString::from_static(service_key),
                 partition_key,
                 scope: None,
             }
@@ -1641,5 +1643,59 @@ mod tests {
 
         assert_eq!(expected_invocation_id, actual_invocation_id);
         assert_eq!(SignalId::for_index(expected_signal_index), actual_signal_id);
+    }
+
+    /// Wire-compatibility test: a ServiceId serialized with the old ByteString fields
+    /// must deserialize correctly with the new ServiceName/ReString fields.
+    #[test]
+    fn service_id_bilrost_wire_compatibility() {
+        use bilrost::{Message, OwnedMessage};
+
+        // Simulate the old format by encoding a bilrost message with ByteString fields
+        #[derive(bilrost::Message)]
+        struct LegacyServiceId {
+            #[bilrost(1)]
+            service_name: ByteString,
+            #[bilrost(2)]
+            key: ByteString,
+            #[bilrost(3)]
+            partition_key: PartitionKey,
+        }
+
+        let legacy = LegacyServiceId {
+            service_name: ByteString::from("MyService"),
+            key: ByteString::from("my-key-123"),
+            partition_key: 42,
+        };
+
+        let mut buf = Vec::new();
+        legacy.encode(&mut buf).unwrap();
+
+        // Decode as the new ServiceId
+        let new_id = ServiceId::decode(buf.as_slice()).unwrap();
+        assert_eq!(new_id.service_name.as_str(), "MyService");
+        assert_eq!(new_id.key.as_str(), "my-key-123");
+        assert_eq!(new_id.partition_key(), 42);
+    }
+
+    /// Wire-compatibility test: ServiceId round-trips through serde JSON
+    #[test]
+    fn service_id_serde_json_roundtrip() {
+        let original = ServiceId::new(None, "TestService", "test-key");
+        let json = serde_json::to_string(&original).unwrap();
+        let deserialized: ServiceId = serde_json::from_str(&json).unwrap();
+        assert_eq!(original, deserialized);
+    }
+
+    /// Wire-compatibility test: a JSON payload with string fields (as ByteString
+    /// would have produced) deserializes into ServiceId with ServiceName/ReString.
+    #[test]
+    fn service_id_serde_json_wire_compatibility() {
+        // Simulate JSON produced by old ByteString-based ServiceId
+        let legacy_json = r#"{"service_name":"OldService","key":"old-key","partition_key":99}"#;
+        let id: ServiceId = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(id.service_name.as_str(), "OldService");
+        assert_eq!(id.key.as_str(), "old-key");
+        assert_eq!(id.partition_key(), 99);
     }
 }

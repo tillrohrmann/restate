@@ -776,7 +776,7 @@ async fn get_output_with_workflow_key() {
     let service_id = ServiceId::new(None, "MyWorkflow", "my-key");
 
     let mock_schemas = MockSchemas::default().with_service_and_target(
-        &service_id.service_name,
+        service_id.service_name.as_str(),
         "run",
         InvocationTargetMetadata::mock(InvocationTargetType::Workflow(
             WorkflowHandlerType::Workflow,
@@ -796,7 +796,7 @@ async fn get_output_with_workflow_key() {
     let mut mock_dispatcher = MockRequestDispatcher::default();
     mock_dispatcher
         .expect_get_invocation_output()
-        .return_once(|actual_invocation_query| {
+        .return_once(move |actual_invocation_query| {
             assert_eq!(
                 InvocationQuery::Workflow(service_id.clone()),
                 actual_invocation_query
@@ -808,8 +808,8 @@ async fn get_output_with_workflow_key() {
                 completion_expiry_time: None,
                 response: InvocationOutputResponse::Success(
                     InvocationTarget::workflow(
-                        service_id.service_name,
-                        service_id.key,
+                        service_id.service_name.as_str(),
+                        service_id.key.as_str(),
                         "run",
                         WorkflowHandlerType::Workflow,
                     ),

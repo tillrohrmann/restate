@@ -19,6 +19,7 @@ use restate_types::invocation::JournalCompletionTarget;
 use restate_types::journal_v2::{
     EntryMetadata, GetPromiseCommand, GetPromiseCompletion, GetPromiseResult,
 };
+use restate_util_string::ReString;
 use tracing::warn;
 
 pub(super) type ApplyGetPromiseCommand<'e> = ApplyJournalCommandEffect<'e, GetPromiseCommand>;
@@ -38,7 +39,7 @@ where
             // Load state and write completion
             let promise_metadata = ctx
                 .storage
-                .get_promise(&service_id, &self.entry.key)
+                .get_promise(&service_id, &ReString::from(self.entry.key.as_ref()))
                 .await?;
 
             let uncompleted_promise_state = match promise_metadata {
@@ -77,7 +78,7 @@ where
             ctx.storage
                 .put_promise(
                     &service_id,
-                    &self.entry.key,
+                    &ReString::from(self.entry.key.as_ref()),
                     &Promise {
                         state: uncompleted_promise_state,
                     },

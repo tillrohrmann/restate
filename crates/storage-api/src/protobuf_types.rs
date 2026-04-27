@@ -2017,12 +2017,14 @@ pub mod v1 {
             type Error = ConversionError;
 
             fn try_from(service_id: ServiceId) -> Result<Self, ConversionError> {
+                let service_name = std::str::from_utf8(&service_id.service_name)
+                    .map_err(ConversionError::invalid_data)?;
+                let service_key = std::str::from_utf8(&service_id.service_key)
+                    .map_err(ConversionError::invalid_data)?;
                 Ok(restate_types::identifiers::ServiceId::new(
                     None,
-                    ByteString::try_from(service_id.service_name)
-                        .map_err(ConversionError::invalid_data)?,
-                    ByteString::try_from(service_id.service_key)
-                        .map_err(ConversionError::invalid_data)?,
+                    service_name,
+                    service_key,
                 ))
             }
         }
@@ -2030,8 +2032,8 @@ pub mod v1 {
         impl From<restate_types::identifiers::ServiceId> for ServiceId {
             fn from(service_id: restate_types::identifiers::ServiceId) -> Self {
                 ServiceId {
-                    service_key: service_id.key.into_bytes(),
-                    service_name: service_id.service_name.into_bytes(),
+                    service_key: Bytes::copy_from_slice(service_id.key.as_bytes()),
+                    service_name: Bytes::copy_from_slice(service_id.service_name.as_bytes()),
                 }
             }
         }

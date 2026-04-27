@@ -15,7 +15,6 @@
 use super::storage_test_environment;
 
 use bytes::Bytes;
-use bytestring::ByteString;
 use restate_rocksdb::RocksDbManager;
 use restate_storage_api::Transaction;
 use restate_storage_api::promise_table::{
@@ -23,13 +22,14 @@ use restate_storage_api::promise_table::{
 };
 use restate_types::identifiers::{InvocationId, InvocationUuid, ServiceId};
 use restate_types::invocation::JournalCompletionTarget;
+use restate_util_string::ReString;
 
 const SERVICE_ID_1: ServiceId = ServiceId::from_static(10, "MySvc", "a");
 const SERVICE_ID_2: ServiceId = ServiceId::from_static(11, "MySvc", "b");
 
-const PROMISE_KEY_1: ByteString = ByteString::from_static("prom1");
-const PROMISE_KEY_2: ByteString = ByteString::from_static("prom2");
-const PROMISE_KEY_3: ByteString = ByteString::from_static("prom3");
+const PROMISE_KEY_1: ReString = ReString::from_static("prom1");
+const PROMISE_KEY_2: ReString = ReString::from_static("prom2");
+const PROMISE_KEY_3: ReString = ReString::from_static("prom3");
 
 const PROMISE_COMPLETED: Promise = Promise {
     state: PromiseState::Completed(PromiseResult::Success(Bytes::from_static(b"{}"))),

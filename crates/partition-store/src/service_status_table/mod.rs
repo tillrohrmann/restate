@@ -8,8 +8,6 @@
 // the Business Source License, use of this software will be governed
 // by the Apache License, Version 2.0.
 
-use bytestring::ByteString;
-
 use restate_rocksdb::{Priority, RocksDbPerfGuard};
 use restate_storage_api::protobuf_types::PartitionStoreProtobufValue;
 use restate_storage_api::service_status_table::{
@@ -17,8 +15,10 @@ use restate_storage_api::service_status_table::{
     WriteVirtualObjectStatusTable,
 };
 use restate_storage_api::{Result, StorageError};
+use restate_types::ServiceName;
 use restate_types::identifiers::{PartitionKey, ServiceId, WithPartitionKey};
 use restate_types::sharding::KeyRange;
+use restate_util_string::ReString;
 
 use crate::keys::{DecodeTableKey, KeyKind, define_table_key};
 use crate::scan::TableScan;
@@ -29,8 +29,8 @@ define_table_key!(
     KeyKind::ServiceStatus,
     ServiceStatusKey(
         partition_key: PartitionKey,
-        service_name: ByteString,
-        service_key: ByteString
+        service_name: ServiceName,
+        service_key: ReString
     )
 );
 

@@ -570,11 +570,11 @@ async fn invoke_with_headers() -> TestResult {
                 entry_index: 1,
                 entry: ProtobufRawEntryCodec::serialize_enriched(Entry::invoke(
                     InvokeRequest {
-                        service_name: service_id.service_name,
+                        service_name: ByteString::from(service_id.service_name.as_str()),
                         handler_name: "MyMethod".into(),
                         parameter: Bytes::default(),
                         headers: vec![Header::new("foo", "bar")],
-                        key: service_id.key,
+                        key: ByteString::from(service_id.key.as_str()),
                         idempotency_key: None,
                     },
                     None,

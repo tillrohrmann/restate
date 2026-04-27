@@ -10,7 +10,6 @@
 
 use std::ops::ControlFlow;
 
-use bytestring::ByteString;
 use futures::Stream;
 use futures_util::stream;
 
@@ -20,9 +19,11 @@ use restate_storage_api::inbox_table::{
 };
 use restate_storage_api::protobuf_types::PartitionStoreProtobufValue;
 use restate_storage_api::{Result, StorageError};
+use restate_types::ServiceName;
 use restate_types::identifiers::{PartitionKey, ServiceId, WithPartitionKey};
 use restate_types::message::MessageIndex;
 use restate_types::sharding::KeyRange;
+use restate_util_string::ReString;
 
 use crate::TableKind::Inbox;
 use crate::keys::{DecodeTableKey, KeyKind, define_table_key};
@@ -36,8 +37,8 @@ define_table_key!(
     KeyKind::Inbox,
     InboxKey(
         partition_key: PartitionKey,
-        service_name: ByteString,
-        service_key: ByteString,
+        service_name: ServiceName,
+        service_key: ReString,
         sequence_number: u64
     )
 );

@@ -60,6 +60,7 @@ pub mod storage;
 pub mod timer;
 pub mod vqueues;
 
+use bytestring::ByteString;
 pub use id_util::IdResourceType;
 pub use identifiers::PartitionedResourceId;
 pub use limit_key::LimitKey;
@@ -105,6 +106,8 @@ pub type SharedString = metrics::SharedString;
     PartialOrd,
     Hash,
     BilrostNewType,
+    serde::Serialize,
+    serde::Deserialize,
 )]
 #[debug("{}", _0)]
 #[display("{}", _0)]
@@ -162,6 +165,18 @@ impl std::borrow::Borrow<str> for ServiceName {
 impl From<&str> for ServiceName {
     fn from(value: &str) -> Self {
         ServiceName::new(value)
+    }
+}
+
+impl From<String> for ServiceName {
+    fn from(value: String) -> Self {
+        ServiceName::new(&value)
+    }
+}
+
+impl From<ByteString> for ServiceName {
+    fn from(value: ByteString) -> Self {
+        ServiceName::new(value.as_ref())
     }
 }
 

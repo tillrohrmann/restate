@@ -1210,4 +1210,39 @@ mod tests {
             assert_eq!(key_prefix, deserialized_key_prefix);
         }
     }
+
+    /// Wire-compatibility: ByteString and ServiceName/ReString produce identical key encodings
+    #[test]
+    fn bytestring_and_service_name_key_encoding_identical() {
+        use restate_types::ServiceName;
+        use restate_util_string::ReString;
+
+        let test_str = "my-test-service";
+
+        let mut bs_buf = BytesMut::new();
+        ByteString::from(test_str).encode(&mut bs_buf);
+
+        let mut sn_buf = BytesMut::new();
+        ServiceName::new(test_str).encode(&mut sn_buf);
+
+        assert_eq!(
+            bs_buf, sn_buf,
+            "ByteString and ServiceName must produce identical key encodings"
+        );
+
+        let mut rs_buf = BytesMut::new();
+        ReString::from(test_str).encode(&mut rs_buf);
+
+        assert_eq!(
+            bs_buf, rs_buf,
+            "ByteString and ReString must produce identical key encodings"
+        );
+
+        // Verify cross-decode: encode as ByteString, decode as ServiceName/ReString
+        let decoded_sn = ServiceName::decode(&mut bs_buf.clone().freeze()).unwrap();
+        assert_eq!(decoded_sn.as_str(), test_str);
+
+        let decoded_rs = ReString::decode(&mut bs_buf.clone().freeze()).unwrap();
+        assert_eq!(decoded_rs.as_str(), test_str);
+    }
 }
