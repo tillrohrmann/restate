@@ -136,6 +136,13 @@ impl<S: VQueueStore> Queue<S> {
                     self.reader = Reader::Closed;
                     return true;
                 }
+
+                // Temporary band-aid: Ensure that the next advance would re-seek the iterators
+                // which will prevent the tailing iterator to silently skip the `key` entry if the
+                // current head happens to be stored in an immutable SST and the current mutable
+                // memtable iterator is past `key`.
+                // todo remove once we drop using tailing iterators
+                self.reader = Reader::Closed;
             }
         }
         false

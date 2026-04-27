@@ -13,18 +13,18 @@ use restate_types::vqueues::VQueueId;
 
 use crate::PartitionDb;
 
+use super::inbox_reader::VQueueInboxReader;
 use super::running_reader::VQueueRunningReader;
-use super::waiting_reader::VQueueWaitingReader;
 
 impl VQueueStore for PartitionDb {
     type RunningReader = VQueueRunningReader;
-    type InboxReader = VQueueWaitingReader;
+    type InboxReader = VQueueInboxReader;
 
     fn new_run_reader(&self, qid: &VQueueId) -> Self::RunningReader {
         VQueueRunningReader::new(self, qid)
     }
 
     fn new_inbox_reader(&self, qid: &VQueueId) -> Self::InboxReader {
-        VQueueWaitingReader::new(self, qid)
+        VQueueInboxReader::new(self, qid)
     }
 }

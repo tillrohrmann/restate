@@ -345,10 +345,14 @@ impl<S: VQueueStore> VQueueState<S> {
     }
 
     pub fn is_dormant(&self) -> bool {
+        // Marking a vqueue as dormant on self.queue.is_empty() alone has the risk that the drr
+        // scheduler removes the vqueue from its internal cache but the state machine does not add
+        // it back because it does it based on the emptiness of the inbox.
+        assert!(!self.queue.is_empty() || self.meta.is_inbox_empty(), "If queue is empty, so should the inbox be. Otherwise, our accounting is wrong.");
         // We hold on to the vqueue until we confirm/reject all pending assignments. If we didn't
         // do so, we risk revisiting/redequeuing the unconfirmed items if the vqueue popped back to life
         // (i.e., on enqueue). This is the reason why we check for `unconfirmed_assignments`
-        (self.queue.is_empty() || self.meta.is_inbox_empty() || self.meta.is_queue_paused())
+        (self.meta.is_inbox_empty() || self.meta.is_queue_paused())
             && self.unconfirmed_assignments.is_empty()
     }
 

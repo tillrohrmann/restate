@@ -21,11 +21,11 @@ use crate::keys::{EncodeTableKeyPrefix, KeyDecode};
 use crate::vqueue_table::InboxKey;
 use crate::vqueue_table::inbox::InboxKeyRef;
 
-pub struct VQueueWaitingReader {
+pub struct VQueueInboxReader {
     it: DBRawIteratorWithThreadMode<'static, rocksdb::DB>,
 }
 
-impl VQueueWaitingReader {
+impl VQueueInboxReader {
     pub(crate) fn new(db: &PartitionDb, qid: &VQueueId) -> Self {
         let mut readopts = rocksdb::ReadOptions::default();
         readopts.set_async_io(true);
@@ -62,7 +62,7 @@ impl VQueueWaitingReader {
     }
 }
 
-impl VQueueCursor for VQueueWaitingReader {
+impl VQueueCursor for VQueueInboxReader {
     fn seek_to_first(&mut self) {
         self.it.seek_to_first();
     }
