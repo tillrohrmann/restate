@@ -493,9 +493,11 @@ message CallCommandMessage {
 
   // Limit key for the invocation. Empty string means no limit key.
   // A limit key is only valid if scope is set.
-  // TODO(tillrohrmann): Revisit string serialization of limit_key. Currently serialized as
-  // "level1" or "level1/level2" which requires parsing on read. Check whether a dedicated
-  // Protobuf message would be faster to serialize/deserialize.
+  // Serialized as "level1" or "level1/level2" — matches the
+  // x-restate-limit-key HTTP ingress header, Display, JSON, and on-disk
+  // bilrost encoding. Per-component RestrictedValue validation dominates
+  // decode cost; a dedicated message was benchmarked and is not faster on
+  // the common L1 case (see crates/types/benches/limit_key.rs).
   // Since V7.
   optional string limit_key = 8;
 
@@ -557,9 +559,11 @@ message OneWayCallCommandMessage {
 
   // Limit key for the invocation. Empty string means no limit key.
   // A limit key is only valid if scope is set.
-  // TODO(tillrohrmann): Revisit string serialization of limit_key. Currently serialized as
-  // "level1" or "level1/level2" which requires parsing on read. Check whether a dedicated
-  // Protobuf message would be faster to serialize/deserialize.
+  // Serialized as "level1" or "level1/level2" — matches the
+  // x-restate-limit-key HTTP ingress header, Display, JSON, and on-disk
+  // bilrost encoding. Per-component RestrictedValue validation dominates
+  // decode cost; a dedicated message was benchmarked and is not faster on
+  // the common L1 case (see crates/types/benches/limit_key.rs).
   // Since V7.
   optional string limit_key = 9;
 

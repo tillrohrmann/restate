@@ -137,5 +137,9 @@ harness = false
 name = "id_encoding"
 harness = false
 
+[[bench]]
+name = "limit_key"
+harness = false
+
 [lints]
 workspace = true
