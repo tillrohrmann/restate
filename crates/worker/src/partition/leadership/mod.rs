@@ -562,21 +562,42 @@ where
                     .await?;
             }
 
+            let mut feature_changes = Vec::default();
+
             // In v1.7.0 we enable by default writing to the journal v2
             if !state_machine_features.use_journal_v2_as_default() {
+                feature_changes.push(PartitionFeatureChange::EnableJournalV2);
+            }
+
+            // Opt this partition in to vqueues if the operator has flipped the experimental config
+            // flag on and the FSM hasn't already recorded the opt-in. The FSM update itself
+            // happens via `OnVersionBarrierCommand` once this proposed barrier is applied; we do
+            // not touch the local FSM mirror here.
+            if config.common.experimental.is_vqueues_enabled()
+                && !state_machine_features.is_vqueues_enabled()
+            {
+                feature_changes.push(PartitionFeatureChange::EnableVqueues);
+            }
+
+            if !feature_changes.is_empty() {
                 self_proposer
                     .self_propose(
                         self.partition.key_range.start(),
                         Command::VersionBarrier(VersionBarrierCommand {
-                            // for backwards compatibility with v1.6 we need to set the version to 1.6.0-dev
-                            version: PartitionFeatureChange::EnableJournalV2
-                                .min_required_version()
-                                .clone(),
+                            version: feature_changes
+                                .iter()
+                                .map(|feature| feature.min_required_version())
+                                .max()
+                                .cloned()
+                                .expect("at least one feature must be enabled"),
                             partition_key_range: Keys::RangeInclusive(
                                 self.partition.key_range.into(),
                             ),
-                            human_reason: Some("Enable journal v2 by default".to_owned()),
-                            feature_changes: vec![PartitionFeatureChange::EnableJournalV2.id()],
+                            human_reason: Some("Enable new features".to_owned()),
+                            feature_changes: feature_changes
+                                .into_iter()
+                                .map(|feature| feature.id())
+                                .collect(),
                         }),
                     )
                     .await?;
