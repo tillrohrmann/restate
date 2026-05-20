@@ -14,7 +14,7 @@ use crate::storage::{
     StorageCodecKind, StorageDecode, StorageDecodeError, StorageEncode, StorageEncodeError, decode,
     encode,
 };
-use crate::{RESTATE_VERSION_1_7_0, SemanticRestateVersion};
+use crate::{RESTATE_VERSION_1_6_0, RESTATE_VERSION_1_7_0, SemanticRestateVersion};
 
 /// A change to the set of state-machine features enabled on a partition.
 ///
@@ -28,13 +28,17 @@ use crate::{RESTATE_VERSION_1_7_0, SemanticRestateVersion};
 /// the change.
 ///
 /// *Since v1.7.0*
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::FromRepr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::FromRepr, strum::EnumIter)]
 #[repr(u16)]
 pub enum PartitionFeatureChange {
+    /// Enable journal v2 by default.
+    ///
+    /// *Since v1.7.0*
+    EnableJournalV2 = 1,
     /// Enable vqueues for the partition.
     ///
     /// *Since v1.7.0*
-    EnableVqueues = 1,
+    EnableVqueues = 2,
 }
 
 impl PartitionFeatureChange {
@@ -48,7 +52,16 @@ impl PartitionFeatureChange {
     /// across all changes carried by the barrier.
     pub fn min_required_version(self) -> &'static SemanticRestateVersion {
         match self {
+            Self::EnableJournalV2 => &RESTATE_VERSION_1_6_0,
             Self::EnableVqueues => &RESTATE_VERSION_1_7_0,
+        }
+    }
+
+    /// Returns true if this variant enables a feature
+    pub fn is_enable_change(self) -> bool {
+        match self {
+            PartitionFeatureChange::EnableJournalV2 => true,
+            PartitionFeatureChange::EnableVqueues => true,
         }
     }
 
@@ -56,13 +69,8 @@ impl PartitionFeatureChange {
     /// change had an effect on the state machine features.
     pub fn apply_to(self, features: &mut PersistedStateMachineFeatures) -> bool {
         match self {
-            Self::EnableVqueues => {
-                let before = features.vqueues;
-                features.vqueues = true;
-
-                // we enable the feature if it was disabled before
-                !before
-            }
+            Self::EnableJournalV2 => !std::mem::replace(&mut features.journal_v2, true),
+            Self::EnableVqueues => !std::mem::replace(&mut features.vqueues, true),
         }
     }
 }
@@ -79,10 +87,15 @@ impl PartitionFeatureChange {
     Debug, Clone, Default, PartialEq, Eq, bilrost::Message, serde::Serialize, serde::Deserialize,
 )]
 pub struct PersistedStateMachineFeatures {
-    /// Virtual queues are enabled on this partition.
+    /// Journal v2 should be used by this partition.
     ///
     /// *Since v1.7.0*
     #[bilrost(tag(1))]
+    pub journal_v2: bool,
+    /// Virtual queues are enabled on this partition.
+    ///
+    /// *Since v1.7.0*
+    #[bilrost(tag(2))]
     pub vqueues: bool,
 }
 
@@ -106,6 +119,16 @@ impl StorageDecode for PersistedStateMachineFeatures {
     {
         assert_eq!(kind, StorageCodecKind::Bilrost);
         decode::decode_bilrost(buf)
+    }
+}
+
+impl FromIterator<PartitionFeatureChange> for PersistedStateMachineFeatures {
+    fn from_iter<I: IntoIterator<Item = PartitionFeatureChange>>(iter: I) -> Self {
+        let mut features = Self::default();
+        for change in iter {
+            change.apply_to(&mut features);
+        }
+        features
     }
 }
 
