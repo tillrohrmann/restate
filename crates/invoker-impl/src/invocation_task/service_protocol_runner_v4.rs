@@ -606,6 +606,10 @@ where
                             };
                             trace!("Sending the entry to the wire");
                             shortcircuit!(self.write_entry_with_lease(&mut http_stream_tx, raw_entry, Some(lease)));
+                            // DIAGNOSTIC: mark when the echo (RunCompletionNotificationMessage) is
+                            // enqueued to the request stream, to correlate with request-pump flush
+                            // timing in the connection pool.
+                            debug!(restate.journal.index = entry_index, "Echo entry enqueued to request stream");
                         }
                         Some(Notification::Completion(_)) => {
                             panic!("We don't expect to receive Notification::Completion in v4+, this is an invoker bug.")
@@ -635,6 +639,9 @@ where
                         }
                         Some(DecoderStreamItem::Parts(parts)) => shortcircuit!(self.handle_response_headers(parts)),
                         Some(DecoderStreamItem::Message(message_header, message)) => {
+                            // DIAGNOSTIC: mark when the SDK actually sends a response message,
+                            // so idle gaps (SDK producing nothing) are visible per invocation.
+                            debug!(?message_header, "Received response message from SDK");
                             shortcircuit!(self.handle_message(message_header, message, attempt_span));
                         }
                     }
@@ -674,6 +681,9 @@ where
                         }
                         Some(DecoderStreamItem::Parts(parts)) => shortcircuit!(self.handle_response_headers(parts)),
                         Some(DecoderStreamItem::Message(message_header, message)) => {
+                            // DIAGNOSTIC: mark when the SDK actually sends a response message,
+                            // so idle gaps (SDK producing nothing) are visible per invocation.
+                            debug!(?message_header, "Received response message from SDK");
                             shortcircuit!(self.handle_message(message_header, message, attempt_span));
                         }
                     }

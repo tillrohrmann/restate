@@ -434,7 +434,8 @@ where
                 .name("h2:connection")
                 .spawn(async move {
                     let mut connection = std::pin::pin!(connection);
-                    let mut keep_alive = std::pin::pin!(Self::keep_alive(ping_pong, shared.config));
+                    let mut keep_alive =
+                        std::pin::pin!(Self::keep_alive(shared.id, ping_pong, shared.config));
 
                     let shared_weak = Arc::downgrade(&shared);
                     drop(shared);
@@ -470,6 +471,7 @@ where
     }
 
     async fn keep_alive(
+        connection_id: usize,
         mut ping_pong: h2::PingPong,
         config: ConnectionConfig,
     ) -> Result<Never, Error> {
@@ -486,13 +488,23 @@ where
         loop {
             interval.tick().await;
 
+            // DIAGNOSTIC: trace keep-alive responsiveness to tell apart an
+            // unresponsive SDK (no PONG) from a stalled data path.
+            let ping_start = std::time::Instant::now();
+            debug!(connection_id, "keep-alive PING sent");
             match tokio::time::timeout(
                 config.keep_alive_timeout,
                 ping_pong.ping(h2::Ping::opaque()),
             )
             .await
             {
-                Ok(Ok(_)) => {}
+                Ok(Ok(_)) => {
+                    debug!(
+                        connection_id,
+                        rtt = ?ping_start.elapsed(),
+                        "keep-alive PONG received"
+                    );
+                }
                 Ok(Err(err)) => return Err(err.into()),
                 Err(_) => {
                     return Err(Error::KeepAliveTimeout);
@@ -805,12 +817,27 @@ where
     ) -> Result<bool, h2::Error> {
         if frame.is_data() {
             let mut data = frame.into_data().unwrap();
+            let stream_id = self.send_stream.stream_id();
 
             while !data.is_empty() {
                 self.send_stream.reserve_capacity(data.len());
+                // DIAGNOSTIC: measure how long we wait for h2 send-window
+                // capacity. A multi-second wait means the peer (SDK) is not
+                // reading the request stream, i.e. it is not granting window.
+                let wait_start = std::time::Instant::now();
                 let size = poll_fn(|cx| self.send_stream.poll_capacity(cx))
                     .await
                     .ok_or(Reason::INTERNAL_ERROR)??;
+                let waited = wait_start.elapsed();
+                if waited > Duration::from_millis(100) {
+                    debug!(
+                        ?stream_id,
+                        requested = data.len(),
+                        granted = size,
+                        ?waited,
+                        "request-pump waited for send capacity"
+                    );
+                }
 
                 let chunk = data.split_to(size.min(data.len()));
                 self.send_stream
