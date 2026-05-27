@@ -57,6 +57,7 @@ use restate_types::limit_key::LimitKey;
 use restate_types::schema::deployment::{Deployment, DeploymentType, ProtocolType};
 use restate_types::schema::invocation_target::{DeploymentStatus, InvocationTargetResolver};
 use restate_types::service_protocol::ServiceProtocolVersion;
+use restate_util_bytecount::ByteCount;
 use restate_util_string::{ReString, RestateString, RestrictedValue};
 use restate_worker_api::invoker::JournalMetadata;
 use restate_worker_api::invoker::invocation_reader::{
@@ -576,7 +577,7 @@ where
                 opt_completion = self.invocation_task.invoker_rx.recv() => {
                     match opt_completion {
                         Some(Notification::Entry(entry_index)) => {
-                            trace!(restate.journal.index = entry_index, "Reading entry from storage");
+                            debug!(restate.journal.index = entry_index, "Reading entry from storage");
                             let (journal_entry, lease) = shortcircuit!(
                                 invocation_reader
                                     .read_journal_entry_budgeted(
@@ -593,6 +594,7 @@ where
                                         ),
                                     )))
                             );
+                            debug!(restate.journal.index = entry_index, "Finished reading entry from storage occupying {}", ByteCount::from(lease.size()));
                             let raw_entry = match journal_entry {
                                 JournalEntry::JournalV2(stored) => stored.inner,
                                 other => {
