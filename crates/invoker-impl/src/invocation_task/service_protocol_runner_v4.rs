@@ -24,9 +24,10 @@ use opentelemetry::KeyValue;
 use opentelemetry::trace::{Span, SpanContext, Status, TraceFlags};
 use prost::Message as ProstMessage;
 use tokio::sync::mpsc;
-use tracing::{debug, trace, warn};
+use tracing::{Level, debug, trace, warn};
 
 use restate_errors::warn_it;
+use restate_futures_util::overdue::OverdueLoggingExt;
 use restate_memory::{LocalMemoryLease, LocalMemoryPool, PinnableMemoryStream};
 use restate_service_client::{Endpoint, Method, Parts, Request};
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
@@ -586,6 +587,8 @@ where
                                         journal_kind,
                                         outbound_budget,
                                     )
+                                    .log_slow_after(Duration::from_secs(5), Level::INFO, "Reading budgeted journal entry is slow. Are we blocked on reading it?")
+                                    .with_overdue(Duration::from_secs(10), Level::WARN)
                                     .await
                                     .map_err(InvokerError::from_journal_reader)
                                     .and_then(|opt| opt.ok_or_else(|| InvokerError::JournalReader(
