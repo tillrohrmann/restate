@@ -24,10 +24,9 @@ use opentelemetry::KeyValue;
 use opentelemetry::trace::{Span, SpanContext, Status, TraceFlags};
 use prost::Message as ProstMessage;
 use tokio::sync::mpsc;
-use tracing::{Level, debug, trace, warn};
+use tracing::{debug, trace, warn};
 
 use restate_errors::warn_it;
-use restate_futures_util::overdue::OverdueLoggingExt;
 use restate_memory::{LocalMemoryLease, LocalMemoryPool, PinnableMemoryStream};
 use restate_service_client::{Endpoint, Method, Parts, Request};
 use restate_service_protocol::codec::ProtobufRawEntryCodec;
@@ -58,7 +57,6 @@ use restate_types::limit_key::LimitKey;
 use restate_types::schema::deployment::{Deployment, DeploymentType, ProtocolType};
 use restate_types::schema::invocation_target::{DeploymentStatus, InvocationTargetResolver};
 use restate_types::service_protocol::ServiceProtocolVersion;
-use restate_util_bytecount::ByteCount;
 use restate_util_string::{ReString, RestateString, RestrictedValue};
 use restate_worker_api::invoker::JournalMetadata;
 use restate_worker_api::invoker::invocation_reader::{
@@ -579,16 +577,29 @@ where
                     match opt_completion {
                         Some(Notification::Entry(entry_index)) => {
                             debug!(restate.journal.index = entry_index, "Reading entry from storage");
-                            let (journal_entry, lease) = shortcircuit!(
+                            let journal_entry = shortcircuit!(
+                                // invocation_reader
+                                //     .read_journal_entry_budgeted(
+                                //         &self.invocation_task.invocation_id,
+                                //         entry_index,
+                                //         journal_kind,
+                                //         outbound_budget,
+                                //     )
+                                //     .log_slow_after(Duration::from_secs(5), Level::INFO, "Reading budgeted journal entry is slow. Are we blocked on reading it?")
+                                //     .with_overdue(Duration::from_secs(10), Level::WARN)
+                                //     .await
+                                //     .map_err(InvokerError::from_journal_reader)
+                                //     .and_then(|opt| opt.ok_or_else(|| InvokerError::JournalReader(
+                                //         anyhow::anyhow!(
+                                //             "journal entry {entry_index} not found for notification read"
+                                //         ),
+                                //     )))
                                 invocation_reader
-                                    .read_journal_entry_budgeted(
+                                    .read_journal_entry(
                                         &self.invocation_task.invocation_id,
                                         entry_index,
                                         journal_kind,
-                                        outbound_budget,
                                     )
-                                    .log_slow_after(Duration::from_secs(5), Level::INFO, "Reading budgeted journal entry is slow. Are we blocked on reading it?")
-                                    .with_overdue(Duration::from_secs(10), Level::WARN)
                                     .await
                                     .map_err(InvokerError::from_journal_reader)
                                     .and_then(|opt| opt.ok_or_else(|| InvokerError::JournalReader(
@@ -597,7 +608,6 @@ where
                                         ),
                                     )))
                             );
-                            debug!(restate.journal.index = entry_index, "Finished reading entry from storage occupying {}", ByteCount::from(lease.size()));
                             let raw_entry = match journal_entry {
                                 JournalEntry::JournalV2(stored) => stored.inner,
                                 other => {
@@ -605,7 +615,7 @@ where
                                 }
                             };
                             trace!("Sending the entry to the wire");
-                            shortcircuit!(self.write_entry_with_lease(&mut http_stream_tx, raw_entry, Some(lease)));
+                            shortcircuit!(self.write_entry_with_lease(&mut http_stream_tx, raw_entry, None));
                             // DIAGNOSTIC: mark when the echo (RunCompletionNotificationMessage) is
                             // enqueued to the request stream, to correlate with request-pump flush
                             // timing in the connection pool.
