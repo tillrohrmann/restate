@@ -909,6 +909,16 @@ impl Body for PermittedRecvStream {
             match ready!(self.stream.poll_data(cx)) {
                 Some(Ok(data)) => {
                     let len = data.len();
+                    // DIAGNOSTIC: log every data frame consumed so we can compute
+                    // per-(connection, stream) byte/sec release rate and compare it
+                    // with the peer's observed inbound WINDOW_UPDATE rate.
+                    let stream_id = self.stream.stream_id();
+                    debug!(
+                        connection_id = self._connection.id,
+                        ?stream_id,
+                        bytes = len,
+                        "h2 release_capacity called"
+                    );
                     let _ = self.stream.flow_control().release_capacity(len);
                     return Poll::Ready(Some(Ok(Frame::data(data))));
                 }
