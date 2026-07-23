@@ -166,6 +166,24 @@ impl VQueuesMetaCache {
         evicted
     }
 
+    pub fn try_compact(&mut self) -> usize {
+        let mut evicted = 0;
+        if self.slab.len() >= self.target_capacity {
+            evicted = self.compact();
+            if evicted == 0 {
+                trace!(
+                    "vqueue cache at {} entries with no inactive queues to evict; cache will grow past target_capacity={}",
+                    self.slab.len(),
+                    self.target_capacity,
+                );
+            } else {
+                trace!("vqueue cache compaction freed {evicted} entries");
+            }
+        }
+
+        evicted
+    }
+
     #[cfg(any(test, feature = "test-util"))]
     pub fn new_empty(target_capacity: usize) -> Self {
         Self {
@@ -234,18 +252,6 @@ impl VQueuesMetaCache {
     /// of entry into the cache; runs compaction when occupancy reaches the
     /// configured `target_capacity`.
     pub(super) fn insert(&mut self, qid: VQueueId, meta: VQueueMeta) -> VQueueHandle {
-        if self.slab.len() >= self.target_capacity {
-            let evicted = self.compact();
-            if evicted == 0 {
-                tracing::trace!(
-                    "vqueue cache at {} entries with no inactive queues to evict; cache will grow past target_capacity={}",
-                    self.slab.len(),
-                    self.target_capacity,
-                );
-            } else {
-                trace!("vqueue cache compaction freed {evicted} entries");
-            }
-        }
         let key = self.slab.insert(Slot {
             qid: qid.clone(),
             meta,
