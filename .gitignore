@@ -21,8 +21,9 @@
 **/flamegraph.svg
 .sl
 
-# Claude code
-.claude
+# Claude Code: only shared skills are versioned
+**/.claude/*
+!/.claude/skills/
 
 # Opencode
 .opencode

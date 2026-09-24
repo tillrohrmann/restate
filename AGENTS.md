@@ -82,3 +82,6 @@ Be extra careful when making changes to the latency critical paths of the system
 
 # Benchmarking Tools
 - **`tools/logserver-bench`** — A standalone benchmark tool for the log-server's RocksDB storage layer. Use it to measure write throughput, mixed read/write/trim workloads, and to validate that log-server changes don't regress performance. See `tools/logserver-bench/README.md` for usage details.
+
+# Review skills
+`restate-local-review` and `restate-deep-review` (in `.agents/skills/`) run only when the user names them explicitly. Ordinary review requests use neither.

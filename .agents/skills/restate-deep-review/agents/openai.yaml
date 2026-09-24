@@ -1,0 +1,7 @@
+interface:
+  display_name: "Restate Deep Review"
+  short_description: "Specialist reviewer panel with critique-and-response debate"
+  default_prompt: "Use $restate-deep-review to deeply review this checkout."
+
+policy:
+  allow_implicit_invocation: false

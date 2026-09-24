@@ -1,0 +1,7 @@
+interface:
+  display_name: "Restate Local Review"
+  short_description: "Single-reviewer, inspection-only local review"
+  default_prompt: "Use $restate-local-review to review this checkout."
+
+policy:
+  allow_implicit_invocation: false
